@@ -1,20 +1,22 @@
 # Releasing opencode-tokscope
 
-This is the manual release procedure. It deliberately does not include CI publishing. Nothing here authorizes publication: every step below is a check, and the publish command runs only after explicit owner approval.
+## Automated release flow (current)
+
+Release Please proposes each release as a `chore(main): release X.Y.Z` pull request containing the version bump, the generated `CHANGELOG.md`, and the manifest update. Merging that pull request into `main` **is** the owner's publish approval; for CI publishing it replaces the per-step approval gates 2–5 of the previous manual procedure. Review the release PR's version and changelog before merging, and merge it only when you intend that exact version to be published. Legal and metadata decisions are not automated: a license, copyright, or author change still needs a new owner decision.
+
+The merge runs `.github/workflows/release.yml`. That run performs the quality checks and the automated artifact acceptance in `scripts/release-acceptance.ts` (clean `git archive` export, tarball allowlist, manifest identity, external host imports, secret/internal-material scan, and a consumer install with `--ignore-scripts`), then publishes with `npm publish` through npm trusted publishing (OIDC with `id-token: write`; no npm token secret exists). The same run creates the tag and the GitHub Release.
+
+Release Please keeps the package pre-1.0: with `bump-minor-pre-major`, `feat` and breaking changes bump the minor version and `fix` bumps the patch version while the version is below 1.0.
+
+The consumer audit stays informational per section 4.1. The known seroval advisory chain is recorded there, and the 2026-11-07 review date stands.
+
+The interactive smoke tests in section 5 and the postpublication named-resolution and `plugin add` checks in section 7 remain **owner-run verification after publication**. They are no longer prepublication gates, but a failure still stops distribution under the rule in section 7.
+
+The manual procedure below is the fallback when CI publishing is unavailable. Never ask for or paste passwords, one-time codes, or npm tokens into chat; the automated flow needs no npm credentials from the owner.
+
+## Manual fallback procedure
 
 > **Dry runs do not publish.** `npm pack`, `npm pack --dry-run`, and `npm publish --dry-run` create or inspect local artifacts only. They are not evidence that a version exists on npm, and a successful dry run is not approval to publish.
-
-## Approval gates
-
-Stop and obtain explicit approval before each of these actions:
-
-1. **Legal and metadata.** MIT licensing and the copyright holder are confirmed for release 0.1.0. Any later license, copyright, or author change needs a new decision.
-2. **Artifact acceptance.** The exact tarball, SHA-256 hash, and npm integrity from the clean-source acceptance run must be recorded and approved. All required prepublication runtime checks must have passed, and the dependency/advisory review in section 4.1 must be current.
-3. **Publication.** Confirm the exact package name and version, that the version is still unpublished, the npm account identity, the public file list, the current dependency/advisory review, and that every required runtime check passed. Pending or failed checks block publication. Approval to implement the release plan is **not** approval to publish.
-4. **Public source hosting.** Publishing to npm does not require a public repository. Making the source public needs separate approval and the repository/history review described below.
-5. **Tags and pushes.** Create or push a tag, or push a branch/remote, only with explicit approval for that action.
-
-Never ask for or paste passwords, one-time codes, or npm tokens into chat. The owner authenticates interactively.
 
 ## Running the checks
 
@@ -467,7 +469,7 @@ Before any public repository push or visibility change, separately review the co
 
 Do not add these during the first manual release:
 
-- CI publishing, including npm trusted publishing/OIDC and provenance.
+- ~~CI publishing, including npm trusted publishing/OIDC and provenance.~~ Delivered 2026-10-25 via Release Please + npm trusted publishing; see **Automated release flow** above.
 - Screenshots or a demo with representative, sanitized data.
 - Ecosystem and community plugin listings.
 

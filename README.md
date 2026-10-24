@@ -54,6 +54,12 @@ To pin the first release instead of following the latest published version, use 
 
 OpenCode loads installed plugins automatically. Run `/tokscope`, or open the palette (`ctrl+p`) and pick "Tokscope". If the command does not appear, run `/reload`; restart OpenCode only when you changed dependencies that it does not watch for reloads.
 
+## Releases
+
+Releases are automated via Release Please, which proposes a release PR containing the version bump and changelog; merging that PR publishes to npm. Each release's contents are recorded in `CHANGELOG.md`.
+
+`opencode plugin add opencode-tokscope` follows the `latest` published version. To pin a version, use `opencode-tokscope@X.Y.Z` as documented above.
+
 ## Local development (Bun)
 
 Consumers install the published package; they do not need Bun or a build step. The npm artifact ships prebuilt JavaScript. The following setup is only for working on this repository.
