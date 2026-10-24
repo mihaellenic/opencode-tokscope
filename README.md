@@ -56,7 +56,9 @@ OpenCode loads installed plugins automatically. Run `/tokscope`, or open the pal
 
 ## Releases
 
-Releases are automated via Release Please, which proposes a release PR containing the version bump and changelog; merging that PR publishes to npm. Each release's contents are recorded in `CHANGELOG.md`.
+Releases are automated via Release Please, which proposes a release PR containing the version bump and changelog; merging that PR publishes to npm. Before publishing, the release job checks out the exact release tag, re-runs typecheck, tests, build, artifact acceptance, and the production consumer advisory audit, then publishes only the accepted tarball and verifies its registry integrity. Any failed check blocks publication. The consumer audit has no waiver: the known seroval advisories currently block automated release until they are triaged or remediated (see `docs/releasing.md` §4.1). Each release's contents are recorded in `CHANGELOG.md`.
+
+The baseline is the published `opencode-tokscope@0.1.0` release and the `v0.1.0` tag; Release Please starts from that state.
 
 `opencode plugin add opencode-tokscope` follows the `latest` published version. To pin a version, use `opencode-tokscope@X.Y.Z` as documented above.
 
@@ -68,8 +70,11 @@ Requires Bun.
 
 ```bash
 bun install
+bun run setup
 bun run build
 ```
+
+`bun run setup` registers the shared commit hook with `git config core.hooksPath githooks`. The hook rejects a first line that is not a Conventional Commit subject: allowed types are `feat`, `fix`, `perf`, `revert`, `docs`, `test`, `build`, `ci`, `chore`, `refactor`, and `style`, with an optional scope and `!`; Git-generated `Merge ...` and `Revert "..."` subjects are also accepted. CI runs the same `scripts/commit-subject-ok.sh`, so bypassing the hook does not bypass the gate.
 
 `Bun.build` with the Solid transform from `@opentui/solid/bun-plugin` produces `dist/tui.js`. Host-provided modules stay **external** so OpenCode's runtime-plugin transform binds them to the TUI's own instances: `effect`, `@opencode/plugin` (and subpaths), `solid-js`, `@opentui/core`, `@opentui/solid`, `@opentui/keymap` (and subpaths). Bundling those produces a second Solid/OpenTUI runtime and the page fails with `No renderer found`.
 

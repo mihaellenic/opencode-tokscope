@@ -4,15 +4,31 @@
 
 Release Please proposes each release as a `chore(main): release X.Y.Z` pull request containing the version bump, the generated `CHANGELOG.md`, and the manifest update. Merging that pull request into `main` **is** the owner's publish approval; for CI publishing it replaces the per-step approval gates 2–5 of the previous manual procedure. Review the release PR's version and changelog before merging, and merge it only when you intend that exact version to be published. Legal and metadata decisions are not automated: a license, copyright, or author change still needs a new owner decision.
 
-The merge runs `.github/workflows/release.yml`. That run performs the quality checks and the automated artifact acceptance in `scripts/release-acceptance.ts` (clean `git archive` export, tarball allowlist, manifest identity, external host imports, secret/internal-material scan, and a consumer install with `--ignore-scripts`), then publishes with `npm publish` through npm trusted publishing (OIDC with `id-token: write`; no npm token secret exists). The same run creates the tag and the GitHub Release.
+Release Please creates the release PR with the repository `GITHUB_TOKEN`, so its pushes do **not** trigger `pull_request` workflows. To validate that PR without a PAT or GitHub App secret, `.github/workflows/release.yml` reads the action's `pr` output and dispatches `.github/workflows/validate-release-pr.yml` with the PR number and exact head SHA. The validation workflow checks the PR through the GitHub API (open PR, head SHA match, base `main`), checks out that exact SHA, and runs the same typecheck, test, build, and commit-subject checks as CI. It then publishes a `release-pr-validation` check run to the release PR head. That check is deliberately **not** a branch-protection required check: it only runs for release PRs, so making it globally required would block ordinary PRs. The owner must confirm it passed before merging. The repository setting **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** must be enabled for Release Please to open the PR.
+
+The merge triggers `.github/workflows/release.yml`. The publish job checks out the **exact release tag** created by Release Please (not floating `main`), sets up Node 24 and a pinned npm `11.16.0` before any npm operation, runs typecheck/tests/build and `scripts/release-acceptance.ts` with `--output-dir`, publishes only the tarball that acceptance preserved, and verifies that the registry version and `dist.integrity` match the accepted metadata with a bounded retry for npm propagation. Trusted publishing uses OIDC (`id-token: write`); no npm token, `NODE_AUTH_TOKEN`, `.npmrc`, or `registry-url` placeholder exists. The release-please job in the same run creates the tag and GitHub Release.
+
+Trusted publisher setup is owner-run: npmjs.com → package `opencode-tokscope` → Settings → **Trusted Publisher**: provider GitHub, repository `mihaellenic/opencode-tokscope`, workflow filename **`release.yml`** (exact match). Do not add a stored npm token.
+
+Artifact acceptance now runs the section 4.1 advisory audit against the scratch production consumer, which has an npm lockfile, and preserves `npm-audit-omit-dev.json` with the release evidence; the workflow uploads that directory as a `release-evidence-<tag>` artifact, including on failure. **Every untriaged high or critical advisory blocks publication.** The known seroval chain is a real baseline finding, so the automated pipeline currently blocks until it is triaged/remediated. The scoped reachability assessment in section 4.1 is **not** a blanket automated exemption; the existing assessment and 2026-11-07 review date stand. There is no waiver, allowlist, or exception mechanism in the workflow.
+
+Retry options:
+
+- **Actions → re-run failed jobs** on the same run retains that run's Release Please outputs (`release_created`, `tag_name`). Use it when the failure happened before publication; the same acceptance and publish steps run again.
+- If the original run cannot be retried, use **Actions → Release → Run workflow** with an existing release tag. Recovery requires a real, non-draft GitHub Release for that tag, validates the tag against `package.json` on the exact tag, and runs the same acceptance/publish pipeline. The input is passed to shell steps only through environment variables; arbitrary refs are never interpolated into commands. The duplicate-version guard stays strict, so recovery refuses to republish a version that is already on npm. If publication already succeeded, verify the registry integrity manually; do not bypass the guard.
+- After a release is confirmed, owner-run smoke tests and postpublication acceptance remain section 5 and section 7 work.
 
 Release Please keeps the package pre-1.0: with `bump-minor-pre-major`, `feat` and breaking changes bump the minor version and `fix` bumps the patch version while the version is below 1.0.
 
-The consumer audit stays informational per section 4.1. The known seroval advisory chain is recorded there, and the 2026-11-07 review date stands.
+The baseline is the published `opencode-tokscope@0.1.0` package and the existing `v0.1.0` tag (commit `e7a72f0`); `.release-please-manifest.json` starts at `0.1.0`. Release Please depends on this bootstrap state; do not delete, move, or reuse the tag, and do not reset the manifest.
 
-The interactive smoke tests in section 5 and the postpublication named-resolution and `plugin add` checks in section 7 remain **owner-run verification after publication**. They are no longer prepublication gates, but a failure still stops distribution under the rule in section 7.
+The interactive smoke tests in section 5 and the postpublication named-resolution and `plugin add` checks in section 7 remain **owner-run verification after publication**. They are not prepublication gates in the automated flow, but a failure still stops distribution under the rule in section 7.
 
-The manual procedure below is the fallback when CI publishing is unavailable. Never ask for or paste passwords, one-time codes, or npm tokens into chat; the automated flow needs no npm credentials from the owner.
+**Status:** the workflow files, scripts, and tests have been reviewed and exercised locally, but no hosted GitHub Actions run of this pipeline has been observed. Do not describe the pipeline as hosted-runtime verified until a real release run is recorded.
+
+For a fresh clone, run `bun install` and `bun run setup` before making release changes. `bun run setup` registers the shared `githooks/commit-msg` Conventional Commit hook; CI runs the same subject script, so bypassing the local hook does not bypass CI.
+
+The manual procedure below is the fallback when CI publishing is unavailable. Never ask for or paste passwords, one-time codes, or npm tokens into chat; the automated flow needs no npm credentials from the owner. No public-source hosting permission is assumed, and the pipeline never pushes source code automatically.
 
 ## Manual fallback procedure
 
@@ -208,6 +224,8 @@ The 2026-10-24 baseline audit exited 1 with five critical entries in npm's per-p
 A scoped reachability assessment found no affected SSR/`fromJSON` deserialization path in the supported host-bound plugin: `seroval` is imported only by Solid's SSR server entry, the shipped `dist/tui.js` imports only the four host externals, and neither the plugin dist nor the `@opentui/solid`, `@opentui/core`, and `@opencode/plugin` dist trees load `solid-js/web`, `seroval`, or `fromJSON` for untrusted data. This is a scoped assessment, **not** a clean audit and not a blanket safety promise. Standalone use of the npm-installed dependency tree is unsupported and may still surface these advisories.
 
 Re-run the consumer audit and re-evaluate reachability **before publication and no later than 2026-11-07, whichever comes first**. Any reachable or untriaged high/critical finding blocks release. An existing unreachable finding may be accepted only with its scope, rationale, and review date recorded in the release evidence; it must never be hidden or described as a clean audit.
+
+Automated acceptance runs this audit itself against the scratch production consumer and fails closed on malformed output, network/auth errors, and **every** high/critical entry. The workflow has no waiver, allowlist, or exception mechanism. The scoped unreachable assessment above is not a blanket automated exemption; a high/critical finding blocks the pipeline until it is remediated or separately triaged through an owner-approved policy change. The known seroval chain therefore blocks automated publication today.
 
 EBADENGINE and deprecation warnings are separate from advisories and are not audit findings. For example, peer auto-resolution may install `@opentui/core@0.6.8`, whose engine metadata targets Node `>=26.4.0` and Bun `>=1.3.14`, while the external npm process used for packing may be older. The supported runtime is OpenCode's bundled host, not that external Node process. Record the warnings; do not override engine checks to silence them.
 
@@ -452,7 +470,7 @@ Report to the owner, without checking private session data into the repository:
 - source commit and package version;
 - exact `opencode --version` used for the smoke test;
 - `bun test` and `bun run typecheck` results from the clean export;
-- tarball filename, file list, SHA-256, and npm integrity;
+- tarball filename, file list, SHA-256, and npm integrity; the accepted `artifact.json` (path/version/integrity) and the `release-evidence-<tag>` workflow artifact;
 - consumer install result;
 - consumer-scoped `npm audit` exit code and JSON, severity buckets, advisory chain, reachability decision, scope/rationale, and review date. Record EBADENGINE/deprecation warnings separately from advisories;
 - each prepublication smoke-test outcome: isolated empty history, real history, and genuine auto-discovery. Pending or failed checks block publication; they are not accepted as pending;
