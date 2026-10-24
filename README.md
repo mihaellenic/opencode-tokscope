@@ -33,7 +33,15 @@ Historical sessions are read through the running OpenCode server, so requests ma
 
 Requires an OpenCode V2 TUI. The packaged plugin is built against the OpenCode 2.1.2 API and development pins; the actual npm artifact was runtime-validated on OpenCode 2.1.4, while 2.1.2 was historically tested. Other 2.x versions are untested, and V1 is not supported.
 
-Add the plugin to the `plugins` array in `~/.config/opencode/cli.json`. Add or extend only that key; keep every unrelated setting already in the file. A minimal file looks like this:
+The one-command install:
+
+```bash
+opencode plugin add opencode-tokscope
+```
+
+`plugin add` classifies the package as a TUI plugin (verified against the released OpenCode 2.1.4 CLI) and records it in `~/.config/opencode/cli.json` for you. Older 2.x CLIs whose `plugin add` predates TUI-class packages do not support this form.
+
+Only if `opencode plugin add` does not work for some reason, add the plugin manually to the `plugins` array in `~/.config/opencode/cli.json`. Add or extend only that key; keep every unrelated setting already in the file. A minimal file looks like this:
 
 ```json
 {
@@ -42,13 +50,7 @@ Add the plugin to the `plugins` array in `~/.config/opencode/cli.json`. Add or e
 }
 ```
 
-To pin the first release instead of following the latest published version:
-
-```json
-{
-  "plugins": ["opencode-tokscope@0.1.0"]
-}
-```
+To pin the first release instead of following the latest published version, use `opencode plugin add opencode-tokscope@0.1.0`, or put `"opencode-tokscope@0.1.0"` in the manual array entry.
 
 OpenCode loads installed plugins automatically. Run `/tokscope`, or open the palette (`ctrl+p`) and pick "Tokscope". If the command does not appear, run `/reload`; restart OpenCode only when you changed dependencies that it does not watch for reloads.
 
@@ -95,14 +97,6 @@ bun run build     # rebuild dist/tui.js, then reload OpenCode
 | `enter` | Retry after a read error |
 
 Defaults on open: all projects, last 30 days, all reasoning settings combined. Current project remains selectable. Header and footer always show the active filters and coverage (`N measured calls; M unavailable`).
-
-## Release follow-ups
-
-These are deliberately deferred until after the first verified manual release:
-
-- CI publishing, including npm trusted publishing/OIDC with provenance.
-- Screenshots or a short demo using representative, sanitized data.
-- Ecosystem and community plugin listings.
 
 ## License
 
