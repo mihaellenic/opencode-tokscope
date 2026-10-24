@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 const read = (path: string): string => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8")
 
 const manifest = JSON.parse(read("../package.json"))
+const releasePleaseManifest = JSON.parse(read("../.release-please-manifest.json"))
 const buildScript = read("../scripts/build.ts")
 const rootEntrypoint = read("../tui.js").trim()
 
@@ -35,8 +36,8 @@ describe("package manifest", () => {
     })
   })
 
-  test("pins the released baseline version", () => {
-    expect(manifest.version).toBe("0.1.0")
+  test("keeps the released version in step with release-please", () => {
+    expect(manifest.version).toBe(releasePleaseManifest["."])
     expect(manifest.version).toMatch(/^0\./)
   })
 
