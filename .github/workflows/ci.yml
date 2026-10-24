@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.3
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
@@ -22,38 +24,57 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }
-      - name: Collect commit subjects to check
-        id: range
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Validate commit subjects
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags origin "${{ github.base_ref }}"
-            git log --format='%H %s' "origin/${{ github.base_ref }}..HEAD"
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+            test -n "$base"
+            test -n "$head"
           else
-            before="${{ github.event.before }}"
-            if [ -z "$before" ] || ! printf '%s' "$before" | grep -q '[^0]'; then
-              echo "skipping subject check: no usable push range (before='${before:-<empty>}')"
-              exit 0
-            fi
-            git log --format='%H %s' "$before..HEAD" || echo "skipping subject check: push range unavailable"
+            before="$PUSH_BEFORE"
+            head="$PUSH_HEAD"
+            test -n "$head"
+            case "$before" in
+              "")
+                # A new branch can arrive with an empty before SHA.
+                echo "new branch push: validating all reachable history"
+                base=""
+                ;;
+              *[!0]*)
+                base="$before"
+                ;;
+              *)
+                # All-zero before is a new branch or force push. Use the defined
+                # safe range: validate all reachable history from the pushed head.
+                echo "all-zero before SHA: validating all reachable history"
+                base=""
+                ;;
+            esac
           fi
-      - name: Validate subjects
-        run: |
-          set -e
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            subjects=$(git log --format='%s' "origin/${{ github.base_ref }}..HEAD")
+          test "$(git rev-parse HEAD)" = "$head"
+          if [ -n "${base:-}" ]; then
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$base"
+            fi
+            subjects=$(git log --format='%s' "$base..$head")
           else
-            before="${{ github.event.before }}"
-            if [ -z "$before" ] || ! printf '%s' "$before" | grep -q '[^0]'; then
-              echo "skipping subject check: no usable push range (before='${before:-<empty>}')"
-              exit 0
-            fi
-            if ! subjects=$(git log --format='%s' "$before..HEAD"); then
-              echo "skipping subject check: push range unavailable"
-              exit 0
-            fi
+            subjects=$(git log --format='%s' "$head")
           fi
-          if [ -z "$subjects" ]; then echo "no commits in range"; exit 0; fi
+          if [ -z "$subjects" ]; then
+            echo "no commits in range"
+            exit 0
+          fi
           while IFS= read -r s; do
             echo "checking: $s"
             sh scripts/commit-subject-ok.sh "$s"
