@@ -1,0 +1,54 @@
+name: Release
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # npm trusted publishing (OIDC) — no token secret
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - run: bun run build
+      - run: mkdir -p "${{ runner.temp }}" && echo "SCRATCH_ROOT=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - run: bun scripts/release-acceptance.ts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
+      - name: Consumer audit (informational, per docs/releasing.md §4.1)
+        id: audit
+        continue-on-error: true
+        run: npm audit --omit=dev --json || true
+      - run: npm publish
+      - name: Verify publication
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          npm view "opencode-tokscope@${v}" version dist.integrity
