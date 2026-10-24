@@ -1,0 +1,60 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+
+  subjects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - name: Collect commit subjects to check
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            git log --format='%H %s' "origin/${{ github.base_ref }}..HEAD"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || ! printf '%s' "$before" | grep -q '[^0]'; then
+              echo "skipping subject check: no usable push range (before='${before:-<empty>}')"
+              exit 0
+            fi
+            git log --format='%H %s' "$before..HEAD" || echo "skipping subject check: push range unavailable"
+          fi
+      - name: Validate subjects
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            subjects=$(git log --format='%s' "origin/${{ github.base_ref }}..HEAD")
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || ! printf '%s' "$before" | grep -q '[^0]'; then
+              echo "skipping subject check: no usable push range (before='${before:-<empty>}')"
+              exit 0
+            fi
+            if ! subjects=$(git log --format='%s' "$before..HEAD"); then
+              echo "skipping subject check: push range unavailable"
+              exit 0
+            fi
+          fi
+          if [ -z "$subjects" ]; then echo "no commits in range"; exit 0; fi
+          while IFS= read -r s; do
+            echo "checking: $s"
+            sh scripts/commit-subject-ok.sh "$s"
+          done <<< "$subjects"
