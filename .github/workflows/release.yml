@@ -48,6 +48,7 @@ jobs:
       - name: Dispatch read-only validation for the release PR head
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_PR: ${{ needs.release-please.outputs.pr }}
         run: |
           set -euo pipefail

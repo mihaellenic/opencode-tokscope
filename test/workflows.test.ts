@@ -150,6 +150,7 @@ describe("release workflow security and gating", () => {
   test("dispatches read-only validation for the release PR output", () => {
     expect(release).toContain("needs.release-please.outputs.pr")
     expect(release).toContain("gh workflow run validate-release-pr.yml")
+    expect(release).toContain("GH_REPO: ${{ github.repository }}")
     expect(release).toContain("gh run watch")
   })
 
