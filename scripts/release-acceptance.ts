@@ -587,6 +587,12 @@ function runAcceptance(options: Extract<AcceptanceOptions, { mode: "accept" }>):
     // unless the caller explicitly opts into local validation. Registry/auth
     // failures are never bypassable.
     const lookup = classifyRegistryLookup(exec(["npm", "view", `${name}@${version}`, "version", "--json"], root))
+    if (lookup.status === "published" && lookup.version !== version) {
+      throw new AcceptanceFailure(
+        "registry-guard",
+        `registry reported ${lookup.version} for ${name}@${version}; refusing to continue`,
+      )
+    }
     const decision = registryGuardDecision(lookup, { allowPublished: options.allowPublished })
     if (!decision.ok) throw new AcceptanceFailure("registry-guard", decision.detail)
     if (decision.warning) warn(decision.warning)
