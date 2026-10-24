@@ -1,4 +1,5 @@
 name: Validate release PR
+run-name: 'Validate release PR #${{ inputs.pr }} request ${{ inputs.request_id }}'
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +9,10 @@ on:
         type: string
       head_sha:
         description: Exact release PR head commit SHA
+        required: true
+        type: string
+      request_id:
+        description: Correlation token from the dispatching release run
         required: true
         type: string
 
@@ -31,8 +36,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          REQUEST_ID: ${{ inputs.request_id }}
         run: |
           set -euo pipefail
+          case "$REQUEST_ID" in
+            ""|*[!0-9-]*) echo "request_id must contain only digits and hyphens" >&2; exit 1 ;;
+          esac
           case "$PR" in
             ""|*[!0-9]*) echo "pr must be numeric" >&2; exit 1 ;;
           esac
@@ -118,10 +127,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       checks: write
+      pull-requests: read
     steps:
       - name: Publish the validation check on the release PR head
         env:
           GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head_sha }}
           RESULT: ${{ needs.validate.result }}
         run: |
@@ -130,6 +141,11 @@ jobs:
             success) conclusion=success ;;
             *) conclusion=failure ;;
           esac
+          actual_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.head.sha // empty')
+          if [ "$actual_sha" != "$HEAD_SHA" ]; then
+            echo "release PR head moved from $HEAD_SHA to ${actual_sha:-<unavailable>}; refusing to publish a stale validation check" >&2
+            exit 1
+          fi
           jq -n \
             --arg sha "$HEAD_SHA" \
             --arg conclusion "$conclusion" \

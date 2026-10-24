@@ -20,18 +20,21 @@ function jobBlock(source: string, name: string): string {
   return next === -1 ? rest : rest.slice(0, next)
 }
 
-/** Multi-line `run: |` bodies; event context must be passed through env, never interpolated into shell source. */
+/** Run steps, multi-line or single-line; event context must be passed through env, never interpolated into shell source. */
 function runBlocks(source: string): string[] {
   const blocks: string[] = []
   let current: string[] | undefined
   let blockIndent = 0
   for (const line of source.split("\n")) {
     if (current === undefined) {
-      const match = /^(\s*)run: \|\s*$/.exec(line)
+      const match = /^(\s*)(?:-\s+)?run: \|\s*$/.exec(line)
       if (match) {
         current = []
         blockIndent = match[1]?.length ?? 0
+        continue
       }
+      const single = /^(\s*)(?:-\s+)?run:\s+(.+)$/.exec(line)
+      if (single?.[2]) blocks.push(single[2])
       continue
     }
     if (line.trim() === "") {
@@ -73,6 +76,12 @@ describe("CI workflow structure", () => {
   test("passes event values through env instead of shell interpolation", () => {
     expect(runBlocks(ci).length).toBeGreaterThan(0)
     for (const block of runBlocks(ci)) expect(block).not.toContain("${{")
+  })
+
+  test("extracts single-line run steps as well as multi-line bodies", () => {
+    const blocks = runBlocks("      - run: echo ${{ github.sha }}\n      - run: |\n          echo ok\n")
+    expect(blocks).toContain("echo ${{ github.sha }}")
+    expect(blocks[1]).toContain("echo ok")
   })
 
   test("pins the installed Bun version", () => {
@@ -154,6 +163,36 @@ describe("release workflow security and gating", () => {
     expect(release).toContain("gh run watch")
   })
 
+  test("never infers the dispatched run id from gh workflow run stdout", () => {
+    const dispatch = jobBlock(release, "validate-release-pr")
+    expect(dispatch).toContain("gh workflow run validate-release-pr.yml")
+    expect(dispatch).not.toContain("run_url=")
+    expect(dispatch).not.toContain("$(gh workflow run")
+    expect(dispatch).not.toContain("##*/")
+  })
+
+  test("correlates the dispatched run by a unique request token before watching", () => {
+    const dispatch = jobBlock(release, "validate-release-pr")
+    expect(dispatch).toContain('REQUEST_ID: ${{ github.run_id }}-${{ github.run_attempt }}')
+    expect(dispatch).toContain('-f request_id="$REQUEST_ID"')
+    expect(dispatch).toContain('expected_title="Validate release PR #$pr request $REQUEST_ID"')
+    expect(dispatch).toContain("actions/workflows/validate-release-pr.yml/runs?event=workflow_dispatch")
+    expect(dispatch).toContain("--arg title \"$expected_title\"")
+    expect(dispatch).toContain("select(.display_title == $title)")
+    expect(dispatch).toContain("seq 1 30")
+    expect(dispatch).not.toContain("createdAt")
+    expect(dispatch).toContain("multiple validation runs match correlation token")
+    expect(dispatch).toContain("did not appear within")
+    expect(dispatch.indexOf("select(.display_title == $title)")).toBeLessThan(dispatch.indexOf("gh run watch"))
+  })
+
+  test("fails visibly when release-please reports a created PR without metadata", () => {
+    const dispatch = jobBlock(release, "validate-release-pr")
+    expect(dispatch).toContain("needs.release-please.outputs.prs_created == 'true'")
+    expect(dispatch).not.toContain("needs.release-please.outputs.pr != ''")
+    expect(dispatch).toContain("release-please reported a created PR without PR metadata")
+  })
+
   test("passes event and input values through env instead of shell interpolation", () => {
     expect(runBlocks(release).length).toBeGreaterThan(0)
     for (const block of runBlocks(release)) expect(block).not.toContain("${{")
@@ -166,6 +205,12 @@ describe("release PR validation workflow", () => {
     expect(validate).toContain("        required: true")
     expect(validate).toContain("head_sha:")
     expect(validate).toContain("pr:")
+    expect(validate).toContain("request_id:")
+    expect(validate).toContain(
+      "run-name: 'Validate release PR #${{ inputs.pr }} request ${{ inputs.request_id }}'",
+    )
+    expect(validate).toContain("inputs.request_id")
+    expect(validate).toContain('case "$REQUEST_ID" in')
   })
 
   test("validates the PR number and exact head SHA through the API", () => {
@@ -194,9 +239,23 @@ describe("release PR validation workflow", () => {
     expect(validateJob).toContain("permissions:\n      contents: read")
     expect(validateJob).not.toContain("contents: write")
     expect(validateJob).not.toContain("pull-requests: write")
-    expect(reportJob).toContain("permissions:\n      checks: write")
+    expect(reportJob).toContain("permissions:\n      checks: write\n      pull-requests: read")
     expect(reportJob).toContain("check-runs")
     expect(reportJob).toContain("needs.validate.result")
+  })
+
+  test("rechecks the PR head before publishing the validation check", () => {
+    const report = jobBlock(validate, "report")
+    expect(report).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"')
+    expect(report).toContain('if [ "$actual_sha" != "$HEAD_SHA" ]')
+    expect(report).toContain("refusing to publish a stale validation check")
+    expect(report.indexOf("pulls/$PR")).toBeLessThan(report.indexOf("check-runs"))
+  })
+
+  test("documents evidence upload precisely", () => {
+    const docs = read("docs/releasing.md")
+    expect(docs).not.toContain("artifact, including on failure")
+    expect(docs).toContain("whenever the acceptance step ran")
   })
 
   test("never executes PR code through pull_request_target", () => {
