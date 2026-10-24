@@ -1,0 +1,3 @@
+#!/bin/sh
+subject=$(head -n1 "$1")
+exec scripts/commit-subject-ok.sh "$subject"

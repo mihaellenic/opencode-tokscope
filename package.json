@@ -13,6 +13,7 @@
     "build": "bun scripts/build.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "setup": "git config core.hooksPath githooks",
     "prepack": "bun run build"
   },
   "dependencies": {
