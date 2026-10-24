@@ -395,7 +395,7 @@ postpub_check pinned "opencode-tokscope@0.1.0"
 postpub_check latest "opencode-tokscope"
 ```
 
-For each run, confirm exactly one Tokscope command, `/tokscope` navigation and Escape return, sidebar rendering and click navigation, the empty-history state, and no missing-module, duplicate-runtime, or `No renderer found` failure. The unversioned run must resolve to the newly published version and must not be satisfied by a local package, path, or symlink. Run the check with a pre-existing `cli.json` state too (create the file first with an unrelated key) and confirm the plugin entry is added while every pre-existing key survives.
+For each run, confirm exactly one Tokscope command, `/tokscope` navigation and Escape return, sidebar rendering and click navigation, the empty-history state, and no missing-module, duplicate-runtime, or `No renderer found` failure. The unversioned run must resolve to the newly published version and must not be satisfied by a local package, path, or symlink. The pre-existing-`cli.json` state check below belongs to the `plugin add` acceptance only: `postpub_check` writes its fixture file directly and is not an exercise in preserving existing keys.
 
 ### `plugin add` acceptance
 
@@ -423,8 +423,15 @@ plugin_add_check() {
   unset OPENCODE_CLI_CONFIG_CONTENT
 
   ( cd "$dir/work" && opencode plugin add opencode-tokscope )
-  grep -F '"opencode-tokscope"' "$dir/config/opencode/cli.json"
-  grep -F '"other": true' "$dir/config/opencode/cli.json"
+
+  node -e '
+const cfg = require(process.argv[1] + "/config/opencode/cli.json")
+if (cfg.other !== true) throw new Error("pre-existing `other` key did not survive: " + JSON.stringify(cfg))
+if (!Array.isArray(cfg.plugins) || !cfg.plugins.includes("opencode-tokscope")) {
+  throw new Error("plugin entry missing or malformed: " + JSON.stringify(cfg))
+}
+console.log("plugin add cli.json acceptance passed (parse-based)")
+' "$dir"
 
   ( cd "$dir/work" && opencode --standalone )
 }
