@@ -48,9 +48,16 @@ jobs:
           state=$(printf '%s' "$pr_json" | jq -r '.state // empty')
           base_ref=$(printf '%s' "$pr_json" | jq -r '.base.ref // empty')
           base_sha=$(printf '%s' "$pr_json" | jq -r '.base.sha // empty')
+          head_repo=$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // empty')
+          head_ref=$(printf '%s' "$pr_json" | jq -r '.head.ref // empty')
           test "$actual_sha" = "$HEAD_SHA"
           test "$state" = "open"
           test "$base_ref" = "main"
+          test "$head_repo" = "$GITHUB_REPOSITORY"
+          case "$head_ref" in
+            release-please--*) ;;
+            *) echo "release PR head branch is not a release-please branch" >&2; exit 1 ;;
+          esac
           case "$base_sha" in
             ""|*[!0-9a-fA-F]*) echo "base SHA is unavailable or malformed" >&2; exit 1 ;;
           esac

@@ -172,6 +172,8 @@ describe("release PR validation workflow", () => {
     expect(validate).toContain('test "$actual_sha" = "$HEAD_SHA"')
     expect(validate).toContain('test "$state" = "open"')
     expect(validate).toContain('test "$base_ref" = "main"')
+    expect(validate).toContain('test "$head_repo" = "$GITHUB_REPOSITORY"')
+    expect(validate).toContain("release-please--*")
     expect(validate).toContain("ref: ${{ inputs.head_sha }}")
     expect(validate).toContain('test "$(git rev-parse HEAD)" = "$HEAD_SHA"')
   })
