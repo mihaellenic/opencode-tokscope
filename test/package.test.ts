@@ -35,6 +35,18 @@ describe("package manifest", () => {
     })
   })
 
+  test("pins the released baseline version", () => {
+    expect(manifest.version).toBe("0.1.0")
+    expect(manifest.version).toMatch(/^0\./)
+  })
+
+  test("points at the canonical repository", () => {
+    expect(manifest.repository).toEqual({
+      type: "git",
+      url: "git+https://github.com/mihaellenic/opencode-tokscope.git",
+    })
+  })
+
   test("keeps host runtimes external", () => {
     for (const runtime of [
       "@opencode/plugin",

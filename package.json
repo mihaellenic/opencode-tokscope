@@ -4,6 +4,7 @@
   "description": "Model and provider throughput comparisons for OpenCode V2.",
   "keywords": ["opencode", "opencode-plugin", "tui", "tokens", "throughput"],
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/mihaellenic/opencode-tokscope.git" },
   "author": "Mihael Lenic",
   "type": "module",
   "exports": { "./tui": "./dist/tui.js" },
