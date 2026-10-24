@@ -306,11 +306,11 @@ opencode --standalone
 
 Confirm `/tokscope` opens through the root `tui.js` re-export and that only one Tokscope copy is loaded. To exercise auto-discovery of the **installed artifact** rather than the source export, link `$INSTALLED` instead and repeat.
 
-### 5.4 Residual risk: prepublication checks cannot prove named npm resolution
+### 5.4 Residual risk: prepublication checks cannot prove named npm resolution or `plugin add` acceptance
 
-Every prepublication check above supplies an explicit path: either `OPENCODE_CLI_CONFIG_CONTENT` or a scratch plugin directory. Those checks prove the artifact, runtime, and isolation behavior, but they do **not** exercise resolving the package by its not-yet-published registry name. The official V2 CLI supports named TUI-only packages; prepublication path checks still cannot prove that name resolution works.
+Every prepublication check above supplies an explicit path: either `OPENCODE_CLI_CONFIG_CONTENT` or a scratch plugin directory. Those checks prove the artifact, runtime, and isolation behavior, but they do **not** exercise resolving the package by its not-yet-published registry name, and they do **not** exercise the `opencode plugin add` install path. The official V2 CLI supports named TUI-only packages, and its `plugin add` command classifies a TUI-only package and records it in `cli.json`; prepublication path checks still cannot prove that either behavior works with the published artifact.
 
-Do not infer publication approval from these checks, and do not stand up or publish to a local registry to simulate the public name. Named resolution must be tested immediately after publication as described in section 7.
+Do not infer publication approval from these checks, and do not stand up or publish to a local registry to simulate the public name. Named resolution and `plugin add` acceptance must both be tested immediately after publication as described in section 7.
 
 Compatibility claims are limited to recorded evidence. OpenCode **2.1.2** is the development API baseline and the historically tested host; the installed host may be a newer 2.x release such as 2.1.4. Record the exact version used for acceptance, but do not add a new README compatibility claim until that run is recorded. If the host cannot be isolated safely, stop; do not publish until the required checks have actually passed.
 
@@ -325,7 +325,7 @@ All of these must be true before the publish command is even considered:
 - The publication target is public and unscoped, with `publishConfig.access = "public"`.
 - The artifact review above passed, and all required prepublication runtime checks passed: path-isolated empty history, real history, and genuine auto-discovery. Pending or failed checks block publication; there is no pending-check bypass.
 - The consumer-scoped advisory audit was re-run before publication or by 2026-11-07, whichever comes first, and reachability was re-evaluated. Any reachable or untriaged high/critical finding blocks release; an unreachable finding is accepted only with recorded scope, rationale, and review date.
-- The residual risk is understood: prepublication path checks cannot prove named npm resolution. Postpublication named-resolution acceptance in section 7 is mandatory, and failure stops distribution.
+- The residual risk is understood: prepublication path checks cannot prove named npm resolution. Postpublication named-resolution and `plugin add` acceptance in section 7 are mandatory, and failure stops distribution.
 - No public source URL is required. Do not invent one; add repository/homepage metadata only if hosting is separately approved.
 
 ```bash
@@ -395,9 +395,46 @@ postpub_check pinned "opencode-tokscope@0.1.0"
 postpub_check latest "opencode-tokscope"
 ```
 
-For each run, confirm exactly one Tokscope command, `/tokscope` navigation and Escape return, sidebar rendering and click navigation, the empty-history state, and no missing-module, duplicate-runtime, or `No renderer found` failure. The unversioned run must resolve to the newly published version and must not be satisfied by a local package, path, or symlink.
+For each run, confirm exactly one Tokscope command, `/tokscope` navigation and Escape return, sidebar rendering and click navigation, the empty-history state, and no missing-module, duplicate-runtime, or `No renderer found` failure. The unversioned run must resolve to the newly published version and must not be satisfied by a local package, path, or symlink. Run the check with a pre-existing `cli.json` state too (create the file first with an unrelated key) and confirm the plugin entry is added while every pre-existing key survives.
 
-If either named configuration fails, `0.1.0` is immutable: stop distribution immediately, do not unpublish or overwrite `0.1.0`, fix the package/name/resolution contract, and repeat full acceptance under a new version such as `0.1.1`.
+### `plugin add` acceptance
+
+This check exercises the documented one-command install path end to end: the CLI resolves the published package by name, installs it, classifies it as a TUI plugin, and records it in `cli.json`. Like the named-resolution runs, it must be satisfied only by the published registry package, never by a local path or symlink, and it runs with scratch-isolated configuration so the owner's own `cli.json` is untouched.
+
+```bash
+plugin_add_check() {
+  local dir="$SCRATCH/plugin-add"
+
+  mkdir -p \
+    "$dir/config/opencode" \
+    "$dir/data" \
+    "$dir/state" \
+    "$dir/cache" \
+    "$dir/db" \
+    "$dir/work"
+
+  printf '{\n  "$schema": "https://opencode.ai/v2/cli.json",\n  "other": true\n}\n' > "$dir/config/opencode/cli.json"
+
+  export XDG_CONFIG_HOME="$dir/config"
+  export XDG_DATA_HOME="$dir/data"
+  export XDG_STATE_HOME="$dir/state"
+  export XDG_CACHE_HOME="$dir/cache"
+  export OPENCODE_DB="$dir/db/plugin-add.db"
+  unset OPENCODE_CLI_CONFIG_CONTENT
+
+  ( cd "$dir/work" && opencode plugin add opencode-tokscope )
+  grep -F '"opencode-tokscope"' "$dir/config/opencode/cli.json"
+  grep -F '"other": true' "$dir/config/opencode/cli.json"
+
+  ( cd "$dir/work" && opencode --standalone )
+}
+
+plugin_add_check
+```
+
+Confirm all of the following: the `opencode plugin add` command announces success against a `cli.json` path under `$XDG_CONFIG_HOME`; the file now contains `opencode-tokscope` and still contains the pre-existing `"other": true` key; the follow-up scratch TUI launch shows exactly one Tokscope command and page with no missing-module, duplicate-runtime, or `No renderer found` failure. If `plugin add` writes to a different file, fails, or corrupts existing keys, that is an acceptance failure: record the exact output and follow the stop-distribution rule below.
+
+If either named configuration or the `plugin add` acceptance fails, `0.1.0` is immutable: stop distribution immediately, do not unpublish or overwrite `0.1.0`, fix the package/name/resolution contract, and repeat full acceptance under a new version such as `0.1.1`.
 
 ## 8. Record release evidence
 
@@ -410,7 +447,7 @@ Report to the owner, without checking private session data into the repository:
 - consumer install result;
 - consumer-scoped `npm audit` exit code and JSON, severity buckets, advisory chain, reachability decision, scope/rationale, and review date. Record EBADENGINE/deprecation warnings separately from advisories;
 - each prepublication smoke-test outcome: isolated empty history, real history, and genuine auto-discovery. Pending or failed checks block publication; they are not accepted as pending;
-- postpublication named-resolution results for both `opencode-tokscope@0.1.0` and `opencode-tokscope`, including any stop-distribution decision;
+- postpublication named-resolution results for both `opencode-tokscope@0.1.0` and `opencode-tokscope`, and the `plugin add` acceptance result, including any stop-distribution decision;
 - publication result and registry integrity comparison, if publication was approved.
 
 ## npm files review versus public source hosting
