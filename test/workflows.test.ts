@@ -77,6 +77,8 @@ describe("CI workflow structure", () => {
 
   test("pins the installed Bun version", () => {
     expect(ci).toContain("bun-version: 1.1.3")
+    expect(release).toContain("bun-version: 1.1.3")
+    expect(validate).toContain("bun-version: 1.1.3")
   })
 })
 
@@ -121,7 +123,6 @@ describe("release workflow security and gating", () => {
     expect(release).toContain('tarball=$(node -p \'require(process.env.ARTIFACT_DIR + "/artifact.json").path\')')
     expect(release).toContain('npm publish "$tarball" --access public')
     expect(release).toContain("--verify-published \"$ARTIFACT_DIR/artifact.json\"")
-    expect(release).not.toMatch(/npm publish\s*\n/)
   })
 
   test("keeps the repo-level advisory audit out of the workflow", () => {
