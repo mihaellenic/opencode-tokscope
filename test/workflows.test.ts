@@ -498,6 +498,24 @@ describe("release PR validation workflow", () => {
     expect(docs).not.toContain("raw audit, acceptance summary, and `head-status.json`")
   })
 
+  test("scopes missing acceptance evidence to this remediation and 0.2.0", () => {
+    const docs = read("docs/releasing.md")
+    expect(docs).not.toContain("no version, including the intended `0.2.0`, has produced passing acceptance evidence yet")
+    expect(docs).toContain("No acceptance evidence exists for this remediation")
+    expect(docs).toContain("The only passing artifact is the historical pre-fix `0.1.1`")
+    expect(docs).toContain("it is not current evidence")
+    expect(docs).toContain("release-pr-evidence-1-1")
+  })
+
+  test("attributes Node and npm to the controller environment, not the Bun commands", () => {
+    const docs = read("docs/releasing.md")
+    expect(docs).not.toContain("With Bun 1.4.4, Node 24.22.1, and npm 11.19.1")
+    expect(docs).toContain("controller-environment.log")
+    expect(docs).toContain("controller separately observed Node 24.22.1 and npm 11.19.1 in its own shell")
+    expect(docs).toContain("not inputs to the Bun commands")
+    expect(docs).toContain("npm `11.16.0`")
+  })
+
   test("never executes PR code through pull_request_target", () => {
     for (const workflow of [ci, release, validate]) {
       expect(workflow).not.toContain("pull_request_target")
