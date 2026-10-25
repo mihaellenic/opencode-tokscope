@@ -423,6 +423,60 @@ describe("history service acquisition", () => {
     failingRelease()
   })
 
+  test("a failed catch-up does not advance the watermark", async () => {
+    const client = new FakeClient()
+    client.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
+    const clock = createClock(NOW)
+    const repository = createStore()
+    const service = createService(client, repository, clock)
+    const release = service.hold()
+    const view = service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    expect(view().kind).toBe("ready")
+    expect(repository.readCoverage("/work/a")).toMatchObject({
+      fullInventoryCompletedAt: NOW,
+      recentCatchUpAt: NOW,
+    })
+
+    client.failListing = true
+    clock.setNow(NOW + RECENT_CATCHUP_MS)
+    service.refreshNow()
+    await clock.settle()
+
+    // The failed catch-up reported the error but never claimed new coverage.
+    expect(view().refreshFailed).toBe(true)
+    expect(repository.readCoverage("/work/a")).toMatchObject({
+      fullInventoryCompletedAt: NOW,
+      recentCatchUpAt: NOW,
+    })
+    release()
+  })
+
+  test("catch-up listing stops at the watermark without re-reading stale pages", async () => {
+    // 201 sessions span three 100-session pages; every one is older than the watermark.
+    const client = new FakeClient()
+    client.sessions = Array.from({ length: 201 }, (_, index) =>
+      fixture(`ses_${String(index).padStart(3, "0")}`, NOW - (index + 1) * 1_000, []),
+    )
+    const clock = createClock(NOW)
+    const service = createService(client, createStore(), clock)
+    const release = service.hold()
+    const view = service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    expect(view().kind).toBe("ready")
+    // The full inventory listed every page (100 + 100 + 1 sessions).
+    expect(client.sessionCalls).toHaveLength(3)
+
+    clock.setNow(NOW + RECENT_CATCHUP_MS)
+    service.refreshNow()
+    await clock.settle()
+
+    // The catch-up starts from the watermark; every session is older, so it stops
+    // after the first page instead of re-reading the stale remaining pages.
+    expect(client.sessionCalls).toHaveLength(4)
+    release()
+  })
+
   test("reset clears durable state and rebuilds from a fresh inventory", async () => {
     const client = new FakeClient()
     client.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
