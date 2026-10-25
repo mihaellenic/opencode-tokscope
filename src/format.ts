@@ -15,6 +15,12 @@ export function formatCoverage(measured: number, unavailable: number): string {
     : `${measured} measured calls`
 }
 
+/** Local wall-clock time as `hh:mm`, used by the cache status banners and the footer. */
+export function formatHm(ms: number): string {
+  const date = new Date(ms)
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`
+}
+
 export function modelDisplayName(
   models: readonly { id: string; providerID: string; name: string }[] | undefined,
   providerID: string,

@@ -1,5 +1,8 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
+import { createRepository } from "./history/durable"
+import { createPluginDurableStore } from "./history/plugin-storage"
+import { createHistoryService } from "./history/service"
 import { TokscopePage } from "./page/tokscope"
 import { createWidgetStore } from "./sidebar/store"
 import { TokscopeSidebar } from "./sidebar/widget"
@@ -27,9 +30,39 @@ export default Plugin.define({
       now: () => Date.now(),
     })
 
+    // One durable namespace and one acquisition pipeline for every server and view. The hold lives
+    // for the plugin, so the cache keeps catching up while OpenCode runs even with no page open.
+    let unsubscribeEvents: (() => void) | undefined
+    const service = createHistoryService({
+      client: context.client,
+      repository: createRepository(createPluginDurableStore(context.storage)),
+      subscribeEvents: (handler) => {
+        unsubscribeEvents = context.data.listen(({ details }) =>
+          handler({ type: details.type, data: details.data as { sessionID?: string } | undefined }),
+        )
+        return unsubscribeEvents
+      },
+      setTimer: (callback, ms) => {
+        const id = setInterval(callback, ms)
+        return () => clearInterval(id)
+      },
+      delay: (callback, ms) => {
+        const id = setTimeout(callback, ms)
+        return () => clearTimeout(id)
+      },
+      now: () => Date.now(),
+    })
+    const release = service.hold()
+
     context.ui.router.register({
       name: "tokscope",
-      render: () => <TokscopePage context={context} onClose={() => context.ui.router.navigate(previous())} />,
+      render: () => (
+        <TokscopePage
+          context={context}
+          service={service}
+          onClose={() => context.ui.router.navigate(previous())}
+        />
+      ),
     })
 
     context.ui.slot({
@@ -51,10 +84,29 @@ export default Plugin.define({
               palette: true,
               run: openTokscope,
             },
+            {
+              id: "tokscope.resetHistory",
+              title: "Tokscope: reset history cache",
+              group: "System",
+              palette: true,
+              run: async () => {
+                const confirmed = await context.ui.dialog.confirm({
+                  title: "Reset Tokscope history cache",
+                  message: "Delete the shared Tokscope history cache and rebuild it from the server?",
+                  label: { confirm: "Reset", cancel: "Cancel" },
+                })
+                if (confirmed === true) await service.reset()
+              },
+            },
           ],
         }))
         return null
       },
     })
+
+    return () => {
+      unsubscribeEvents?.()
+      release()
+    }
   },
 })
