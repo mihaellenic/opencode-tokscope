@@ -89,8 +89,18 @@ function snapshotSlot(key: string): number | undefined {
   return slot < VIEW_SNAPSHOT_LIMIT ? slot : undefined
 }
 
+function isSnapshotIndexKey(key: string): boolean {
+  return snapshotSlot(key) !== undefined
+}
+
 function sameView(a: ViewSnapshot, b: ViewSnapshot): boolean {
   return a.directoryFilter === b.directoryFilter && a.range === b.range
+}
+
+interface LiveSnapshot {
+  key: string
+  slot: number
+  snapshot: ViewSnapshot
 }
 
 /** Replaces the whole segment payload: a stale or unreadable shape must not survive a write. */
@@ -99,13 +109,11 @@ function replaceDraft(draft: Record<string, unknown>, value: object): void {
   Object.assign(draft, value)
 }
 
-/** Reads a `{ keys: string[] }` index, dropping entries that do not belong to this repository. */
-function readKeyIndex(
-  store: DurableStore,
-  key: string,
+/** Parses a `{ keys: string[] }` index payload, dropping entries that do not belong to it. */
+function parseKeyIndex(
+  payload: object | undefined,
   accept: (candidate: string) => boolean,
 ): string[] {
-  const payload = store.read(key)
   const keys = payload === undefined ? undefined : (payload as { keys?: unknown }).keys
   if (!Array.isArray(keys)) return []
   const result: string[] = []
@@ -114,6 +122,14 @@ function readKeyIndex(
     result.push(entry)
   }
   return result
+}
+
+function readKeyIndex(
+  store: DurableStore,
+  key: string,
+  accept: (candidate: string) => boolean,
+): string[] {
+  return parseKeyIndex(store.read(key), accept)
 }
 
 function mergeTombstones(existing: readonly string[], added: readonly string[]): string[] {
@@ -185,7 +201,21 @@ export function createRepository(store: DurableStore): HistoryRepository {
     parseTombstones(store.read(TOMBSTONES_KEY)) ?? { sessionIDs: [] }
 
   const readSnapshotIndex = (): string[] =>
-    readKeyIndex(store, SNAPSHOTS_INDEX_KEY, (key) => snapshotSlot(key) !== undefined)
+    readKeyIndex(store, SNAPSHOTS_INDEX_KEY, isSnapshotIndexKey)
+
+  /** Indexed slots whose payload still parses, in index order (oldest first). */
+  const liveSnapshots = (keys: readonly string[]): LiveSnapshot[] => {
+    const live: LiveSnapshot[] = []
+    for (const key of keys) {
+      const slot = snapshotSlot(key)
+      if (slot === undefined) continue
+      const parsed = parseViewSnapshot(store.read(key))
+      // A slot that no longer parses leaves the index here: reads are synchronous, so this is the
+      // only write path that can evict it.
+      if (parsed !== undefined) live.push({ key, slot, snapshot: parsed })
+    }
+    return live
+  }
 
   return {
     loadAllShards() {
@@ -270,14 +300,14 @@ export function createRepository(store: DurableStore): HistoryRepository {
 
     async writeCoverage(record: CoverageRecord): Promise<void> {
       const key = coverageKey(record.directoryFilter)
-      const indexed = readKeyIndex(store, COVERAGE_INDEX_KEY, isCoverageKey)
       // Index before payload: a failure in between leaves a key `clear()` can still find, never a
-      // coverage record that `clear()` would miss.
-      if (!indexed.includes(key)) {
-        await store.write(COVERAGE_INDEX_KEY, (draft) =>
-          replaceDraft(draft, { keys: [...indexed, key] }),
-        )
-      }
+      // coverage record that `clear()` would miss. The list is merged from the draft, not from a
+      // read taken before the write, so an index write that lands after another directory's can
+      // never drop that directory's entry — an entry only `clear()` could otherwise reach.
+      await store.write(COVERAGE_INDEX_KEY, (draft) => {
+        const indexed = parseKeyIndex(draft, isCoverageKey)
+        replaceDraft(draft, { keys: indexed.includes(key) ? indexed : [...indexed, key] })
+      })
       await store.write(key, (draft) => replaceDraft(draft, record))
     },
 
@@ -292,15 +322,7 @@ export function createRepository(store: DurableStore): HistoryRepository {
     },
 
     async writeViewSnapshot(snapshot: ViewSnapshot): Promise<void> {
-      const live: { key: string; slot: number; snapshot: ViewSnapshot }[] = []
-      for (const key of readSnapshotIndex()) {
-        const slot = snapshotSlot(key)
-        if (slot === undefined) continue
-        const parsed = parseViewSnapshot(store.read(key))
-        // A slot that no longer parses leaves the index here: reads are synchronous, so this is
-        // the only write path that can evict it.
-        if (parsed !== undefined) live.push({ key, slot, snapshot: parsed })
-      }
+      const live = liveSnapshots(readSnapshotIndex())
 
       const updated = live.filter((entry) => sameView(entry.snapshot, snapshot)).at(-1)
       const kept = live.filter((entry) => !sameView(entry.snapshot, snapshot))
@@ -322,11 +344,19 @@ export function createRepository(store: DurableStore): HistoryRepository {
         }
       }
 
-      const keys = [...kept.map((entry) => entry.key), viewSnapshotKey(slot)]
+      const key = viewSnapshotKey(slot)
       // Payload before index: a failure in between leaves an unreferenced snapshot the next write
       // overwrites, never an indexed slot without data.
-      await store.write(viewSnapshotKey(slot), (draft) => replaceDraft(draft, snapshot))
-      await store.write(SNAPSHOTS_INDEX_KEY, (draft) => replaceDraft(draft, { keys }))
+      await store.write(key, (draft) => replaceDraft(draft, snapshot))
+      // The key list is merged from the draft rather than written from the planning read, so an
+      // entry another write appends in between is kept; the bound trims the oldest entries, which
+      // is the same FIFO eviction picked above.
+      await store.write(SNAPSHOTS_INDEX_KEY, (draft) => {
+        const current = liveSnapshots(parseKeyIndex(draft, isSnapshotIndexKey))
+          .filter((entry) => entry.key !== key && !sameView(entry.snapshot, snapshot))
+          .map((entry) => entry.key)
+        replaceDraft(draft, { keys: [...current, key].slice(-VIEW_SNAPSHOT_LIMIT) })
+      })
     },
 
     readWidgetSnapshot() {

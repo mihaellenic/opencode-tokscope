@@ -79,6 +79,22 @@ async function seed(store: DurableStore, key: string, value: object): Promise<vo
   })
 }
 
+/**
+ * Applies each mutation a microtask after it is requested, like a host store that persists before
+ * it commits: two calls can then both read a segment before either write to it lands.
+ */
+function createDeferredStore(): DurableStore & { dump(): Map<string, object> } {
+  const base = createMemoryStore()
+  return {
+    read: (key) => base.read(key),
+    async write(key, mutate) {
+      await Promise.resolve()
+      await base.write(key, mutate)
+    },
+    dump: () => base.dump(),
+  }
+}
+
 const tksKeys = (store: Map<string, object>): string[] =>
   [...store.keys()].filter((key) => key.startsWith("tks.")).sort()
 
@@ -264,6 +280,34 @@ describe("coverage", () => {
     expect(tksKeys(store.dump()).sort()).toEqual(
       ["tks.coverage.all", coverageStorageKey("/work/a"), "tks.coverage-index"].sort(),
     )
+  })
+
+  test("keeps both entries when two directory writes overlap", async () => {
+    const store = createDeferredStore()
+    const repository = createRepository(store)
+
+    // Both calls read the coverage index before either write lands, so the index write that commits
+    // second must merge rather than replace: a dropped entry orphans a coverage key that only
+    // `clear()` could reach again, leaving a stale watermark behind after a reset.
+    await Promise.all([
+      repository.writeCoverage(coverage("/work/a")),
+      repository.writeCoverage(coverage("/work/b")),
+    ])
+
+    expect(repository.readCoverage("/work/a")).toEqual(coverage("/work/a"))
+    expect(repository.readCoverage("/work/b")).toEqual(coverage("/work/b"))
+    expect((store.dump().get("tks.coverage-index") as { keys: string[] }).keys.sort()).toEqual(
+      [coverageStorageKey("/work/a"), coverageStorageKey("/work/b")].sort(),
+    )
+
+    await repository.clear()
+
+    expect(repository.readCoverage("/work/a")).toBeUndefined()
+    expect(repository.readCoverage("/work/b")).toBeUndefined()
+    for (const [key, value] of store.dump()) {
+      if (!key.startsWith("tks.")) continue
+      expect(Object.keys(value)).toEqual([])
+    }
   })
 
   test("rejects a record whose stored filter does not match its key (hash collision)", async () => {
