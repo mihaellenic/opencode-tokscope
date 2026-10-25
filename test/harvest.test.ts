@@ -322,6 +322,17 @@ describe("scanMessages", () => {
     expect(result.samples[0].completedAt).toBe(7_000)
   })
 
+  test("aborts on a repeated cursor", async () => {
+    const repeated: Page<AssistantMessage>[] = [
+      { data: [measured()], cursor: { next: "c1" } },
+      { data: [measured()], cursor: { next: "c1" } },
+    ]
+    const client = new FakeClient([], { s1: repeated })
+
+    await expect(scanMessages(client, session("s1", 0, 100))).rejects.toThrow(/repeated cursor/)
+    expect(client.messageCalls.length).toBeLessThanOrEqual(3)
+  })
+
   test("counts independent identical requests in non-fork sessions", async () => {
     const identical = { created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }
     const client = new FakeClient([], { s1: pages([measured(identical), measured(identical)]) })
@@ -363,6 +374,17 @@ describe("listSessions", () => {
 
     expect(client.sessionCalls).toHaveLength(3)
     expect(result.boundaryReached).toBe(true)
+  })
+
+  test("aborts on a repeated cursor", async () => {
+    const repeated: Page<SessionStub>[] = [
+      { data: [session("s1", 0, 100)], cursor: { next: "c1" } },
+      { data: [session("s2", 0, 90)], cursor: { next: "c1" } },
+    ]
+    const client = new FakeClient(repeated)
+
+    await expect(listSessions(client, {})).rejects.toThrow(/repeated cursor/)
+    expect(client.sessionCalls.length).toBeLessThanOrEqual(3)
   })
 
   test("reads every page for unbounded history", async () => {

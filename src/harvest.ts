@@ -56,6 +56,7 @@ export async function listSessions(
 ): Promise<{ sessions: SessionMeta[]; boundaryReached: boolean }> {
   const sessions: SessionMeta[] = []
   const fromMs = options.fromMs
+  const seenCursors = new Set<string>()
   let sessionCursor: string | undefined
   do {
     const page = await client.session.list(
@@ -73,6 +74,10 @@ export async function listSessions(
       fromMs !== undefined && page.data.length > 0 && page.data.every((session) => session.time.updated < fromMs)
     if (stalePage) return { sessions, boundaryReached: true }
     sessionCursor = page.cursor.next ?? undefined
+    if (sessionCursor !== undefined) {
+      if (seenCursors.has(sessionCursor)) throw new Error("repeated cursor")
+      seenCursors.add(sessionCursor)
+    }
   } while (sessionCursor !== undefined)
 
   return { sessions, boundaryReached: true }
@@ -103,6 +108,7 @@ export async function scanMessages(
   const samples: Sample[] = []
   const unavailable: UnavailableSample[] = []
 
+  const seenCursors = new Set<string>()
   let messageCursor: string | undefined
   do {
     const page = await client.message.list(
@@ -118,6 +124,10 @@ export async function scanMessages(
       else if (result.kind === "unavailable") unavailable.push(result.sample)
     }
     messageCursor = page.cursor.next ?? undefined
+    if (messageCursor !== undefined) {
+      if (seenCursors.has(messageCursor)) throw new Error("repeated cursor")
+      seenCursors.add(messageCursor)
+    }
   } while (messageCursor !== undefined)
 
   return { samples, unavailable }
