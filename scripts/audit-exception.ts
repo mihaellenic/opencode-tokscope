@@ -20,6 +20,10 @@ import { join } from "node:path"
 const ADVISORY_P6VX = "https://github.com/advisories/GHSA-p6vx-979v-rg4c"
 const ADVISORY_JP82 = "https://github.com/advisories/GHSA-jp82-f5mq-hwhp"
 
+/** The explicit tracking issue this exception is authorized against. */
+export const SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE =
+  "https://github.com/mihaellenic/opencode-tokscope/issues/2"
+
 export interface AuditExceptionAdvisory {
   package: string
   name: string
@@ -32,6 +36,7 @@ export interface AuditException {
   expiresAt: string
   ownerAuthorization: string
   rationale: string
+  trackingIssue: string
   advisories: readonly AuditExceptionAdvisory[]
   /** The released package; its version must match the current artifact manifest. */
   root: string
@@ -48,6 +53,7 @@ export const SEROVAL_AUDIT_EXCEPTION: AuditException = {
     "Owner authorized 2026-10-25: accept only GHSA-p6vx-979v-rg4c and GHSA-jp82-f5mq-hwhp on the pinned host-bound TUI chain through 2026-11-06T23:59:59.999Z. Every other finding, package, path, or version remains blocking.",
   rationale:
     "docs/releasing.md §4.1 records that the affected seroval SSR/fromJSON deserialization paths are unreachable in the supported OpenCode host-bound TUI and that standalone use of the npm dependency tree is unsupported. This exception is not a clean audit and does not cover new advisories or paths.",
+  trackingIssue: SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE,
   advisories: [
     { package: "seroval", name: "seroval", url: ADVISORY_P6VX, severity: "critical" },
     { package: "seroval", name: "seroval", url: ADVISORY_JP82, severity: "high" },
@@ -123,6 +129,11 @@ function exceptionProblems(exception: AuditException, now: Date): string[] {
   if (!exception.id.trim()) problems.push("id is empty")
   if (!exception.ownerAuthorization.trim()) problems.push("owner authorization is missing")
   if (!exception.rationale.trim()) problems.push("rationale is missing")
+  if (exception.trackingIssue !== SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE) {
+    problems.push(
+      `tracking issue ${exception.trackingIssue || "<missing>"} is not the expected ${SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE}`,
+    )
+  }
   if (!exception.root.trim()) problems.push("root package is missing")
   if (exception.versions[exception.root] !== undefined) {
     problems.push(`root package ${exception.root} must use the current artifact version, not a literal pin`)
@@ -306,6 +317,7 @@ export interface AuditExceptionEvidence {
     expiresAt: string
     ownerAuthorization: string
     rationale: string
+    trackingIssue: string
     rootPackage: string
     advisories: AuditExceptionAdvisory[]
   }
@@ -332,6 +344,7 @@ export function auditExceptionEvidence(
       expiresAt: exception.expiresAt,
       ownerAuthorization: exception.ownerAuthorization,
       rationale: exception.rationale,
+      trackingIssue: exception.trackingIssue,
       rootPackage: exception.root,
       advisories: exception.advisories.map((advisory) => ({ ...advisory })),
     },

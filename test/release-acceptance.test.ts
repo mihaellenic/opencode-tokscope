@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   SEROVAL_AUDIT_EXCEPTION,
+  SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE,
   auditExceptionDecision,
   auditExceptionEvidence,
   readConsumerVersions,
@@ -521,6 +522,11 @@ describe("scoped audit exception", () => {
       versions: { ...SEROVAL_AUDIT_EXCEPTION.versions, [SEROVAL_AUDIT_EXCEPTION.root]: "0.1.0" },
     }
     expect(blockedDetail(serovalChain, undefined, { exception: literalRoot })).toContain("literal")
+
+    for (const trackingIssue of ["", "https://github.com/mihaellenic/opencode-tokscope/issues/999"]) {
+      const badIssue = { ...SEROVAL_AUDIT_EXCEPTION, trackingIssue }
+      expect(blockedDetail(serovalChain, undefined, { exception: badIssue })).toContain("tracking issue")
+    }
   })
 
   test("rejects a new advisory even when approved advisories remain on seroval", () => {
@@ -626,7 +632,11 @@ describe("scoped audit exception", () => {
     expect(text).toContain(SEROVAL_AUDIT_EXCEPTION.expiresAt)
     expect(text).toContain("NOT a clean audit")
     expect(text).toContain(SEROVAL_AUDIT_EXCEPTION.ownerAuthorization)
+    expect(text).toContain(SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE)
     expect((evidence.exception as { id?: string }).id).toBe(SEROVAL_AUDIT_EXCEPTION.id)
+    expect((evidence.exception as { trackingIssue?: string }).trackingIssue).toBe(
+      SEROVAL_AUDIT_EXPECTED_TRACKING_ISSUE,
+    )
   })
 })
 
