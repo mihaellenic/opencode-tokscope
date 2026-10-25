@@ -1,6 +1,13 @@
 import { classifyAssistant, type AssistantMessage, type Sample, type UnavailableSample } from "./metric"
 import type { SessionMessageInfo } from "@opencode/client"
 
+export interface SessionMeta {
+  id: string
+  time: { created: number; updated: number }
+  location?: { directory?: string }
+  fork?: { sessionID: string; boundary: { type: "before" | "through"; messageID: string } }
+}
+
 export interface HarvestClient {
   session: {
     list(input?: {
@@ -45,6 +52,52 @@ export interface HarvestResult {
 const SESSION_PAGE_SIZE = 100
 const MESSAGE_PAGE_SIZE = 200
 const DEFAULT_CONCURRENCY = 8
+
+export async function listSessions(
+  client: HarvestClient,
+  options: { directory?: string; fromMs?: number },
+): Promise<{ sessions: SessionMeta[]; boundaryReached: boolean }> {
+  const sessions: SessionMeta[] = []
+  const fromMs = options.fromMs
+  let sessionCursor: string | undefined
+  do {
+    const page = await client.session.list(
+      sessionCursor === undefined
+        ? {
+            limit: SESSION_PAGE_SIZE,
+            order: "desc",
+            ...(options.directory === undefined ? {} : { directory: options.directory }),
+          }
+        : { limit: SESSION_PAGE_SIZE, cursor: sessionCursor },
+    )
+    sessions.push(...page.data)
+    // Pages are newest-first, so a page with nothing in range ends the bounded read.
+    const stalePage =
+      fromMs !== undefined && page.data.length > 0 && page.data.every((session) => session.time.updated < fromMs)
+    if (stalePage) return { sessions, boundaryReached: true }
+    sessionCursor = page.cursor.next ?? undefined
+  } while (sessionCursor !== undefined)
+
+  return { sessions, boundaryReached: true }
+}
+
+export function inRangeSamples(
+  result: { samples: Sample[]; unavailable: UnavailableSample[] },
+  fromMs: number | undefined,
+): { samples: Sample[]; unavailable: UnavailableSample[] } {
+  if (fromMs === undefined) return result
+  return {
+    samples: result.samples.filter((sample) => sample.completedAt >= fromMs),
+    unavailable: result.unavailable.filter((sample) => sample.completedAt >= fromMs),
+  }
+}
+
+export function collectVariants(samples: Sample[], unavailable: UnavailableSample[]): string[] {
+  const variantSet = new Set<string>()
+  for (const sample of samples) if (sample.variant !== undefined) variantSet.add(sample.variant)
+  for (const sample of unavailable) if (sample.variant !== undefined) variantSet.add(sample.variant)
+  return [...variantSet].sort()
+}
 
 export async function collectMeasurements(
   client: HarvestClient,
@@ -118,9 +171,5 @@ export async function collectMeasurements(
 
   await Promise.all(Array.from({ length: concurrency }, worker))
 
-  const variantSet = new Set<string>()
-  for (const sample of samples) if (sample.variant !== undefined) variantSet.add(sample.variant)
-  for (const sample of unavailable) if (sample.variant !== undefined) variantSet.add(sample.variant)
-
-  return { samples, unavailable, variants: [...variantSet].sort() }
+  return { samples, unavailable, variants: collectVariants(samples, unavailable) }
 }
