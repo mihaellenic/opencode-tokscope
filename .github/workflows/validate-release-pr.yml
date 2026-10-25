@@ -29,6 +29,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      acceptance: ${{ steps.evidence.outputs.acceptance || 'not-run' }}
+      artifact: ${{ steps.evidence.outputs.artifact || 'unavailable' }}
+      audit: ${{ steps.evidence.outputs.audit || 'unavailable' }}
     steps:
       - name: Validate PR identity through the GitHub API
         id: pr
@@ -96,16 +100,32 @@ jobs:
           git fetch --no-tags origin main
           git cat-file -e "${BASE_SHA}^{commit}"
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Pin npm for release acceptance
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.16.0
+          test "$(npm --version)" = "11.16.0"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.1.3
 
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun test
-      - run: bun run build
+      - id: install
+        run: bun install --frozen-lockfile
+      - id: typecheck
+        run: bun run typecheck
+      - id: test
+        run: bun test
+      - id: build
+        run: bun run build
 
       - name: Validate release PR commit subjects
+        id: subjects
         env:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
@@ -121,6 +141,102 @@ jobs:
             sh scripts/commit-subject-ok.sh "$s"
           done <<< "$subjects"
 
+      - name: Accept the exact release PR artifact
+        id: accept
+        env:
+          SCRATCH_ROOT: ${{ runner.temp }}
+          ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
+        run: bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"
+
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tokscope-release-pr
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summarize validation and acceptance evidence
+        id: evidence
+        if: always()
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
+          ACCEPTANCE: ${{ steps.accept.outcome || 'not-run' }}
+          INSTALL: ${{ steps.install.outcome || 'not-run' }}
+          TYPECHECK: ${{ steps.typecheck.outcome || 'not-run' }}
+          TEST: ${{ steps.test.outcome || 'not-run' }}
+          BUILD: ${{ steps.build.outcome || 'not-run' }}
+          SUBJECTS: ${{ steps.subjects.outcome || 'not-run' }}
+          ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
+          EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          artifact=not-produced
+          artifact_detail="no accepted artifact was preserved"
+          audit=not-run
+          audit_detail="the consumer audit did not run"
+
+          if [ -f "$ARTIFACT_DIR/artifact.json" ]; then
+            if jq -e '(.name | type) == "string" and (.version | type) == "string" and (.filename | type) == "string" and (.integrity | type) == "string"' \
+              "$ARTIFACT_DIR/artifact.json" >/dev/null 2>&1; then
+              identity=$(jq -r '.name + "@" + .version + " (" + .filename + ")"' "$ARTIFACT_DIR/artifact.json")
+              artifact=accepted
+              artifact_detail="accepted $identity"
+            else
+              artifact=unreadable
+              artifact_detail="artifact.json is incomplete or unreadable"
+            fi
+          fi
+
+          if [ -f "$ARTIFACT_DIR/accepted-audit-exceptions.json" ]; then
+            audit=exception-applied
+            audit_detail="scoped audit exception applied — NOT a clean audit; see accepted-audit-exceptions.json"
+          elif [ -f "$ARTIFACT_DIR/npm-audit-omit-dev.json" ]; then
+            if jq -e '(.metadata.vulnerabilities.high | type) == "number" and (.metadata.vulnerabilities.critical | type) == "number"' \
+              "$ARTIFACT_DIR/npm-audit-omit-dev.json" >/dev/null 2>&1; then
+              high=$(jq -r '.metadata.vulnerabilities.high' "$ARTIFACT_DIR/npm-audit-omit-dev.json")
+              critical=$(jq -r '.metadata.vulnerabilities.critical' "$ARTIFACT_DIR/npm-audit-omit-dev.json")
+              if [ "$high" -gt 0 ] || [ "$critical" -gt 0 ]; then
+                audit=blocking
+                audit_detail="blocking high=$high critical=$critical advisories in the raw consumer audit"
+              elif [ "$ACCEPTANCE" = "success" ]; then
+                audit=no-high-critical
+                audit_detail="no high/critical advisories in the raw consumer audit"
+              else
+                audit=unverified
+                audit_detail="raw consumer audit present but not confirmed by a successful acceptance"
+              fi
+            else
+              audit=unusable
+              audit_detail="the raw consumer audit report is unusable"
+            fi
+          fi
+
+          {
+            echo "acceptance=$ACCEPTANCE"
+            echo "artifact=$artifact"
+            echo "audit=$audit"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release PR validation"
+            echo ""
+            echo "Prerequisites for head \`$HEAD_SHA\`: install=$INSTALL typecheck=$TYPECHECK test=$TEST build=$BUILD subjects=$SUBJECTS"
+            echo ""
+            echo "Artifact acceptance (preflight, registry guard, pack, consumer audit): **$ACCEPTANCE**"
+            echo ""
+            echo "- Artifact: $artifact_detail"
+            echo "- Audit: $audit_detail"
+            echo "- Evidence artifact: \`$EVIDENCE_ARTIFACT\`"
+            echo ""
+            echo "Acceptance covers the artifact only; it does not verify publication."
+            if [ "$audit" = "exception-applied" ]; then
+              echo ""
+              echo "**Audit exception applied — this is NOT a clean audit.**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   report:
     needs: validate
     if: always()
@@ -135,12 +251,67 @@ jobs:
           PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head_sha }}
           RESULT: ${{ needs.validate.result }}
+          ACCEPTANCE: ${{ needs.validate.outputs.acceptance }}
+          ARTIFACT: ${{ needs.validate.outputs.artifact }}
+          AUDIT: ${{ needs.validate.outputs.audit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          case "$RESULT" in
-            success) conclusion=success ;;
-            *) conclusion=failure ;;
+          conclusion=failure
+          if [ "$RESULT" = "success" ] && [ "$ACCEPTANCE" = "success" ] && [ "$ARTIFACT" = "accepted" ]; then
+            case "$AUDIT" in
+              exception-applied|no-high-critical) conclusion=success ;;
+            esac
+          fi
+          title="Release PR validation failed ($ACCEPTANCE)"
+          case "$ACCEPTANCE" in
+            success)
+              if [ "$conclusion" = "success" ]; then
+                title="Release PR validation passed"
+              else
+                title="Release PR validation failed after artifact acceptance"
+              fi
+              ;;
+            skipped|not-run)
+              title="Release PR validation failed before artifact acceptance"
+              ;;
+            failure)
+              case "$AUDIT" in
+                blocking) title="Release PR artifact audit failed" ;;
+                unusable) title="Release PR artifact audit could not be evaluated" ;;
+                *) title="Release PR artifact acceptance failed" ;;
+              esac
+              ;;
           esac
+          case "$ARTIFACT" in
+            accepted) artifact_status="accepted artifact preserved as evidence" ;;
+            not-produced) artifact_status="no accepted artifact was preserved" ;;
+            *) artifact_status="artifact status unavailable" ;;
+          esac
+          case "$AUDIT" in
+            exception-applied) audit_status="scoped audit exception applied; NOT a clean audit (see accepted-audit-exceptions.json)" ;;
+            no-high-critical) audit_status="raw consumer audit reported no high/critical advisories" ;;
+            blocking) audit_status="blocking high/critical advisories reported" ;;
+            unusable) audit_status="raw consumer audit report absent or unusable" ;;
+            unverified) audit_status="raw consumer audit report present but not confirmed by acceptance" ;;
+            *) audit_status="consumer audit did not run" ;;
+          esac
+          if [ "$conclusion" = "success" ]; then
+            outcome_line="Artifact accepted for publication. This check does not verify publication."
+          else
+            outcome_line="Validation did not pass. Acceptance covers the artifact only; it does not verify publication."
+          fi
+          summary=$(printf '%s\n' \
+            "Release PR validation result: $RESULT" \
+            "" \
+            "- Artifact acceptance: $ACCEPTANCE" \
+            "- Artifact: $artifact_status" \
+            "- Audit: $audit_status" \
+            "- Evidence artifact: $EVIDENCE_ARTIFACT" \
+            "" \
+            "Dispatched validation run: $RUN_URL" \
+            "$outcome_line")
           actual_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.head.sha // empty')
           if [ "$actual_sha" != "$HEAD_SHA" ]; then
             echo "release PR head moved from $HEAD_SHA to ${actual_sha:-<unavailable>}; refusing to publish a stale validation check" >&2
@@ -149,6 +320,8 @@ jobs:
           jq -n \
             --arg sha "$HEAD_SHA" \
             --arg conclusion "$conclusion" \
-            --arg summary "Release PR validation finished with result: $RESULT" \
-            '{name: "release-pr-validation", head_sha: $sha, status: "completed", conclusion: $conclusion, output: {title: "Release PR validation", summary: $summary}}' \
+            --arg title "$title" \
+            --arg summary "$summary" \
+            --arg details_url "$RUN_URL" \
+            '{name: "release-pr-validation", head_sha: $sha, status: "completed", conclusion: $conclusion, details_url: $details_url, output: {title: $title, summary: $summary}}' \
             | gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input -

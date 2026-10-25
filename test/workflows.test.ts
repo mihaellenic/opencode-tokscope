@@ -244,12 +244,142 @@ describe("release PR validation workflow", () => {
     expect(reportJob).toContain("needs.validate.result")
   })
 
+  test("sets up Node and pins npm before artifact acceptance", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const node = validateJob.indexOf("actions/setup-node@v5")
+    const npmPin = validateJob.indexOf("npm install -g npm@11.16.0")
+    const acceptance = validateJob.indexOf("release-acceptance.ts --output-dir")
+    expect(node).toBeGreaterThan(-1)
+    expect(npmPin).toBeGreaterThan(node)
+    expect(acceptance).toBeGreaterThan(npmPin)
+    expect(validateJob).toContain("node-version: 24")
+    expect(validateJob).toContain("package-manager-cache: false")
+    expect(validateJob).toContain('test "$(npm --version)" = "11.16.0"')
+    expect(validateJob).toContain("bun-version: 1.1.3")
+    expect(validateJob).not.toContain("npm@latest")
+  })
+
+  test("accepts the checked-out head artifact after the CI gates with no bypass", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const checkout = validateJob.indexOf("ref: ${{ inputs.head_sha }}")
+    const build = validateJob.indexOf("bun run build")
+    const subjects = validateJob.indexOf("scripts/commit-subject-ok.sh")
+    const acceptance = validateJob.indexOf(
+      'bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"',
+    )
+    expect(checkout).toBeGreaterThan(-1)
+    expect(checkout).toBeLessThan(acceptance)
+    expect(build).toBeLessThan(acceptance)
+    expect(subjects).toBeLessThan(acceptance)
+    expect(validateJob).toContain("SCRATCH_ROOT: ${{ runner.temp }}")
+    expect(validateJob).toContain("ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr")
+    expect(validateJob).not.toContain("--allow-published")
+    expect(validateJob).not.toContain("--verify-published")
+    expect(validateJob).not.toContain("npm publish")
+    expect(validateJob).not.toContain("continue-on-error")
+  })
+
+  test("keeps artifact acceptance free of registry credentials and OIDC", () => {
+    const validateJob = jobBlock(validate, "validate")
+    expect(validateJob).toContain("permissions:\n      contents: read\n      pull-requests: read")
+    for (const forbidden of ["id-token", "NODE_AUTH_TOKEN", "NPM_TOKEN", "secrets.", "registry-url"]) {
+      expect(validateJob).not.toContain(forbidden)
+    }
+  })
+
+  test("uploads the full acceptance evidence directory even when acceptance fails", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const acceptance = validateJob.indexOf('release-acceptance.ts --output-dir "$ARTIFACT_DIR"')
+    const upload = validateJob.indexOf("actions/upload-artifact@v4")
+    expect(upload).toBeGreaterThan(acceptance)
+    const evidenceStep = validateJob.slice(
+      validateJob.indexOf("Preserve acceptance evidence"),
+      validateJob.indexOf("id: evidence"),
+    )
+    expect(evidenceStep).toContain("if: always()")
+    expect(evidenceStep).toContain(
+      "name: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}",
+    )
+    expect(evidenceStep).toContain("path: ${{ runner.temp }}/tokscope-release-pr")
+    expect(evidenceStep).toContain("if-no-files-found: warn")
+    expect(evidenceStep).toContain("retention-days: 14")
+    expect(evidenceStep).not.toContain("continue-on-error")
+  })
+
+  test("exposes acceptance, artifact, and audit outcomes with fail-safe defaults", () => {
+    const validateJob = jobBlock(validate, "validate")
+    expect(validateJob).toContain(
+      "acceptance: ${{ steps.evidence.outputs.acceptance || 'not-run' }}",
+    )
+    expect(validateJob).toContain("artifact: ${{ steps.evidence.outputs.artifact || 'unavailable' }}")
+    expect(validateJob).toContain("audit: ${{ steps.evidence.outputs.audit || 'unavailable' }}")
+    expect(validateJob).toContain("ACCEPTANCE: ${{ steps.accept.outcome || 'not-run' }}")
+    expect(validateJob).toContain("$GITHUB_STEP_SUMMARY")
+    expect(validateJob).toContain("Prerequisites for head")
+    expect(validateJob).toContain("preflight")
+    expect(validateJob).toContain("NOT a clean audit")
+    expect(validateJob).toContain("audit=unverified")
+    expect(validateJob).not.toContain("publish verified")
+    expect(validateJob).not.toContain("publication verified")
+    expect(validateJob).toContain("does not verify publication")
+  })
+
   test("rechecks the PR head before publishing the validation check", () => {
     const report = jobBlock(validate, "report")
     expect(report).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"')
     expect(report).toContain('if [ "$actual_sha" != "$HEAD_SHA" ]')
     expect(report).toContain("refusing to publish a stale validation check")
     expect(report.indexOf("pulls/$PR")).toBeLessThan(report.indexOf("check-runs"))
+  })
+
+  test("links the check run to the dispatched validation run", () => {
+    const report = jobBlock(validate, "report")
+    expect(report).toContain(
+      "RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+    )
+    expect(report).toContain('--arg details_url "$RUN_URL"')
+    expect(report).toContain("details_url: $details_url")
+    expect(report).toContain("Dispatched validation run: $RUN_URL")
+    expect(report.indexOf('"$RUN_URL"')).toBeLessThan(report.indexOf("check-runs"))
+  })
+
+  test("reports artifact and audit status from the validate job outputs", () => {
+    const report = jobBlock(validate, "report")
+    expect(report).toContain("ACCEPTANCE: ${{ needs.validate.outputs.acceptance }}")
+    expect(report).toContain("ARTIFACT: ${{ needs.validate.outputs.artifact }}")
+    expect(report).toContain("AUDIT: ${{ needs.validate.outputs.audit }}")
+    expect(report).toContain(
+      "EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}",
+    )
+    expect(report).toContain("Artifact: $artifact_status")
+    expect(report).toContain("Audit: $audit_status")
+    expect(report).toContain("unverified) audit_status=")
+    expect(report).toContain("NOT a clean audit")
+  })
+
+  test("keeps failed audit, generic failure, and unreached acceptance distinct", () => {
+    const report = jobBlock(validate, "report")
+    expect(report).toContain('title="Release PR artifact audit failed"')
+    expect(report).toContain('title="Release PR artifact acceptance failed"')
+    expect(report).toContain('title="Release PR validation failed before artifact acceptance"')
+    expect(report).toContain("skipped|not-run")
+    expect(report).toContain("blocking")
+  })
+
+  test("marks the check successful only when validation and acceptance passed", () => {
+    const report = jobBlock(validate, "report")
+    expect(report).toContain(
+      'if [ "$RESULT" = "success" ] && [ "$ACCEPTANCE" = "success" ] && [ "$ARTIFACT" = "accepted" ]',
+    )
+    expect(report).toContain("exception-applied|no-high-critical) conclusion=success")
+    expect(report).toContain("conclusion=failure")
+    expect(report).not.toContain("conclusion=neutral")
+    expect(report).not.toContain("continue-on-error")
+  })
+
+  test("passes inputs through env in validation and reporting steps", () => {
+    expect(runBlocks(validate).length).toBeGreaterThan(0)
+    for (const block of runBlocks(validate)) expect(block).not.toContain("${{")
   })
 
   test("documents evidence upload precisely", () => {
