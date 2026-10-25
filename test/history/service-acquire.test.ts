@@ -190,6 +190,75 @@ describe("history service acquisition", () => {
     release()
   })
 
+  test("measurement shards hydrate lazily: none at construction, cached content on first view", async () => {
+    const repository = createStore()
+    const seedClient = new FakeClient()
+    seedClient.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
+    const seedClock = createClock(NOW)
+    const seed = createService(seedClient, repository, seedClock)
+    const seedRelease = seed.hold()
+    seed.view({ directory: "/work/a", range: "last30" })
+    await seedClock.settle()
+    seedRelease()
+
+    let shardLoads = 0
+    const spied: HistoryRepository = {
+      ...repository,
+      loadAllShards: () => {
+        shardLoads += 1
+        return repository.loadAllShards()
+      },
+    }
+
+    const clock = createClock(NOW + 60_000)
+    const client = new FakeClient()
+    client.sessions = seedClient.sessions
+    const service = createService(client, spied, clock)
+    // Construction reads the widget snapshot and tombstones, never the measurement shards.
+    expect(shardLoads).toBe(0)
+
+    const view = service.view({ directory: "/work/a", range: "last30" })
+    // The first view hydrates synchronously, so cached content is available immediately.
+    expect(shardLoads).toBe(1)
+    expect(view().kind).toBe("cached")
+    expect(view().lastCheckedAt).toBe(NOW)
+    expect(view().samples).toHaveLength(1)
+
+    // A further view reuses the hydrated shards rather than re-reading them.
+    service.view({ directory: "/work/a", range: "last7" })
+    expect(shardLoads).toBe(1)
+  })
+
+  test("a view recomputes live from an unhydrated repository without rescanning unchanged sessions", async () => {
+    const repository = createStore()
+    const seedClient = new FakeClient()
+    seedClient.sessions = [
+      fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)]),
+      fixture("ses_b", NOW - 2_000, [measured(NOW - 2_500)]),
+    ]
+    const seedClock = createClock(NOW)
+    const seed = createService(seedClient, repository, seedClock)
+    const seedRelease = seed.hold()
+    seed.view({ directory: "/work/a", range: "last30" })
+    await seedClock.settle()
+    seedRelease()
+
+    // A new service over the same store hydrates nothing at construction.
+    const clock = createClock(NOW + 60_000)
+    const client = new FakeClient()
+    client.sessions = seedClient.sessions
+    const service = createService(client, repository, clock)
+    const release = service.hold()
+    const view = service.view({ directory: "/work/a", range: "last30" })
+    await clock.settle()
+
+    expect(view().kind).toBe("ready")
+    expect(view().samples).toHaveLength(2)
+    // The signatures still match, so the lazy hydration skipped every unchanged message scan.
+    expect(client.messageCalls).toHaveLength(0)
+    release()
+  })
+
   test("only changed sessions are refetched", async () => {
     const client = new FakeClient()
     client.sessions = [

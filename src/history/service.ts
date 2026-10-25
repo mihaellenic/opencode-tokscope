@@ -217,6 +217,7 @@ export function createHistoryService(deps: {
   let pendingRecords: SessionRecord[] = []
   let persistence: "ok" | "unavailable" = "ok"
   let widgetPublished = false
+  let hydrated = false
 
   const storedWidget = deps.repository.readWidgetSnapshot()
   const [widgetState, setWidgetState] = createSignal<WidgetSharedState>(
@@ -226,18 +227,26 @@ export function createHistoryService(deps: {
   )
   if (storedWidget !== undefined) widgetPublished = true
 
+  // Construction reads the widget snapshot and tombstones only: measurement shards hydrate lazily
+  // on the first view or pass, so a widget-only startup never touches stored measurements.
   rememberTombstones()
-  for (const shard of deps.repository.loadAllShards().values()) {
-    for (const entry of Object.values(shard.index)) {
-      if (!tombstones.has(entry.sessionID)) index.set(entry.sessionID, entry)
-    }
-    for (const record of Object.values(shard.records)) {
-      if (!tombstones.has(record.sessionID)) records.set(record.sessionID, record)
-    }
-  }
 
   function rememberTombstones(): void {
     for (const sessionID of deps.repository.loadTombstones().sessionIDs) tombstones.add(sessionID)
+  }
+
+  /** Rebuilds the in-memory record/index maps from durable shards, at most once per process. */
+  function hydrateShards(): void {
+    if (hydrated) return
+    hydrated = true
+    for (const shard of deps.repository.loadAllShards().values()) {
+      for (const entry of Object.values(shard.index)) {
+        if (!tombstones.has(entry.sessionID)) index.set(entry.sessionID, entry)
+      }
+      for (const record of Object.values(shard.records)) {
+        if (!tombstones.has(record.sessionID)) records.set(record.sessionID, record)
+      }
+    }
   }
 
   /** Drops an in-memory copy of a tombstoned session; the durable copy is the deletion layer's job. */
@@ -818,6 +827,8 @@ export function createHistoryService(deps: {
   }
 
   async function runPass(directory: string | undefined): Promise<void> {
+    // Hydrate before diffing against cached records so unchanged sessions are skipped, not rescanned.
+    hydrateShards()
     const status = statusFor(directory)
     status.refreshing = true
     const startedAt = now()
@@ -973,6 +984,7 @@ export function createHistoryService(deps: {
     const lastCheckedAt = snapshot?.lastCheckedAt
     // The first read is synchronous: durable shards rebuild the cache, the snapshot says how fresh
     // it is, and a cached window is never reported as ready until the live pass replaces it.
+    hydrateShards()
     const [state, setState] = createSignal<ViewState>(
       buildState(request, snapshot === undefined ? "loading" : "cached", lastCheckedAt, true, false),
     )
