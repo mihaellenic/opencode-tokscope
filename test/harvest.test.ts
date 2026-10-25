@@ -5,6 +5,7 @@ import {
   collectVariants,
   inRangeSamples,
   listSessions,
+  scanMessages,
   type HarvestClient,
 } from "../src/harvest"
 import { median } from "../src/stats"
@@ -241,6 +242,37 @@ describe("collectMeasurements", () => {
     expect(result.samples).toHaveLength(1)
   })
 
+  test("propagates errors", async () => {
+    const client = new FakeClient(pages([session("s1", 0, 100)]), { s1: pages([measured()]) })
+    client.rejectMessages = true
+
+    await expect(collectMeasurements(client, {})).rejects.toThrow("boom")
+  })
+})
+
+describe("scanMessages", () => {
+  test("returns complete session measurements without range filtering", async () => {
+    const client = new FakeClient([], {
+      s1: pages(
+        [measured({ completed: 5_000 }), measured({ completed: 12_000 })],
+        [measured({ completed: 30_000 })],
+      ),
+    })
+
+    const result = await scanMessages(client, session("s1", 0, 40_000))
+
+    expect(result.samples.map((sample) => sample.completedAt)).toEqual([5_000, 12_000, 30_000])
+    expect(result.unavailable).toHaveLength(0)
+    expect(client.messageCalls[0]).toMatchObject({
+      sessionID: "s1",
+      limit: 200,
+      order: "desc",
+      type: "assistant",
+    })
+    expect(client.messageCalls[1].cursor).toBe("c1")
+    expect(client.messageCalls[1].order).toBeUndefined()
+  })
+
   test("excludes inherited fork copies", async () => {
     const parentTen = {
       created: 0,
@@ -248,46 +280,43 @@ describe("collectMeasurements", () => {
       completed: 11_000,
       tokens: tokens(0, 100, 0),
     }
-    const client = new FakeClient(
-      pages([
-        session("s1", 0, 20_000),
-        session("s2", 20_000, 30_000, undefined, {
-          sessionID: "s1",
-          boundary: { type: "through", messageID: "m1" },
-        }),
+    const client = new FakeClient([], {
+      s1: pages([
+        measured(parentTen),
+        measured({ created: 0, streamed: 1_000, completed: 2_000, tokens: tokens(0, 100, 0) }),
       ]),
-      {
-        s1: pages([
-          measured(parentTen),
-          measured({ created: 0, streamed: 1_000, completed: 2_000, tokens: tokens(0, 100, 0) }),
-        ]),
-        s2: pages([measured(parentTen)]),
-      },
+      s2: pages([measured(parentTen)]),
+    })
+
+    const parent = await scanMessages(client, session("s1", 0, 20_000))
+    const fork = await scanMessages(
+      client,
+      session("s2", 20_000, 30_000, undefined, {
+        sessionID: "s1",
+        boundary: { type: "through", messageID: "m1" },
+      }),
     )
+    const samples = [...parent.samples, ...fork.samples]
 
-    const result = await collectMeasurements(client, {})
-
-    expect(result.samples.map((sample) => sample.rate).sort((a, b) => a - b)).toEqual([10, 100])
-    expect(median(result.samples.map((sample) => sample.rate))).toBe(55)
+    expect(samples.map((sample) => sample.rate).sort((a, b) => a - b)).toEqual([10, 100])
+    expect(median(samples.map((sample) => sample.rate))).toBe(55)
   })
 
   test("counts new requests created in the fork", async () => {
-    const client = new FakeClient(
-      pages([
-        session("s2", 5_000, 30_000, undefined, {
-          sessionID: "s1",
-          boundary: { type: "through", messageID: "m1" },
-        }),
+    const client = new FakeClient([], {
+      s2: pages([
+        measured({ created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }),
+        measured({ created: 5_000, streamed: 6_000, completed: 7_000, tokens: tokens(25, 25, 0) }),
       ]),
-      {
-        s2: pages([
-          measured({ created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }),
-          measured({ created: 5_000, streamed: 6_000, completed: 7_000, tokens: tokens(25, 25, 0) }),
-        ]),
-      },
-    )
+    })
 
-    const result = await collectMeasurements(client, {})
+    const result = await scanMessages(
+      client,
+      session("s2", 5_000, 30_000, undefined, {
+        sessionID: "s1",
+        boundary: { type: "through", messageID: "m1" },
+      }),
+    )
 
     expect(result.samples).toHaveLength(1)
     expect(result.samples[0].completedAt).toBe(7_000)
@@ -295,20 +324,11 @@ describe("collectMeasurements", () => {
 
   test("counts independent identical requests in non-fork sessions", async () => {
     const identical = { created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }
-    const client = new FakeClient(pages([session("s1", 0, 20_000)]), {
-      s1: pages([measured(identical), measured(identical)]),
-    })
+    const client = new FakeClient([], { s1: pages([measured(identical), measured(identical)]) })
 
-    const result = await collectMeasurements(client, {})
+    const result = await scanMessages(client, session("s1", 0, 20_000))
 
     expect(result.samples).toHaveLength(2)
-  })
-
-  test("propagates errors", async () => {
-    const client = new FakeClient(pages([session("s1", 0, 100)]), { s1: pages([measured()]) })
-    client.rejectMessages = true
-
-    await expect(collectMeasurements(client, {})).rejects.toThrow("boom")
   })
 })
 

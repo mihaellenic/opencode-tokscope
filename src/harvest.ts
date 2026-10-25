@@ -6,6 +6,8 @@ export interface SessionMeta {
   time: { created: number; updated: number }
   location?: { directory?: string }
   fork?: { sessionID: string; boundary: { type: "before" | "through"; messageID: string } }
+  cost?: number
+  tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
 }
 
 export interface HarvestClient {
@@ -16,12 +18,7 @@ export interface HarvestClient {
       directory?: string
       cursor?: string
     }): Promise<{
-      data: {
-        id: string
-        time: { created: number; updated: number }
-        location?: { directory?: string }
-        fork?: { sessionID: string; boundary: { type: "before" | "through"; messageID: string } }
-      }[]
+      data: SessionMeta[]
       cursor: { next?: string | null }
     }>
   }
@@ -99,30 +96,38 @@ export function collectVariants(samples: Sample[], unavailable: UnavailableSampl
   return [...variantSet].sort()
 }
 
+export async function scanMessages(
+  client: HarvestClient,
+  session: SessionMeta,
+): Promise<{ samples: Sample[]; unavailable: UnavailableSample[] }> {
+  const samples: Sample[] = []
+  const unavailable: UnavailableSample[] = []
+
+  let messageCursor: string | undefined
+  do {
+    const page = await client.message.list(
+      messageCursor === undefined
+        ? { sessionID: session.id, limit: MESSAGE_PAGE_SIZE, order: "desc", type: "assistant" }
+        : { sessionID: session.id, limit: MESSAGE_PAGE_SIZE, type: "assistant", cursor: messageCursor },
+    )
+    for (const message of page.data) {
+      if (message.type !== "assistant") continue
+      if (session.fork !== undefined && message.time.created < session.time.created) continue
+      const result = classifyAssistant(message)
+      if (result.kind === "measured") samples.push(result.sample)
+      else if (result.kind === "unavailable") unavailable.push(result.sample)
+    }
+    messageCursor = page.cursor.next ?? undefined
+  } while (messageCursor !== undefined)
+
+  return { samples, unavailable }
+}
+
 export async function collectMeasurements(
   client: HarvestClient,
   options: HarvestOptions = {},
 ): Promise<HarvestResult> {
-  const sessions: {
-    id: string
-    time: { created: number; updated: number }
-    location?: { directory?: string }
-    fork?: { sessionID: string; boundary: { type: "before" | "through"; messageID: string } }
-  }[] = []
-  let sessionCursor: string | undefined
-  do {
-    const page = await client.session.list(
-      sessionCursor === undefined
-        ? {
-            limit: SESSION_PAGE_SIZE,
-            order: "desc",
-            ...(options.directory === undefined ? {} : { directory: options.directory }),
-          }
-        : { limit: SESSION_PAGE_SIZE, cursor: sessionCursor },
-    )
-    sessions.push(...page.data)
-    sessionCursor = page.cursor.next ?? undefined
-  } while (sessionCursor !== undefined)
+  const { sessions } = await listSessions(client, { directory: options.directory, fromMs: options.fromMs })
 
   const inRange = sessions.filter(
     (session) =>
