@@ -20,16 +20,6 @@ export default Plugin.define({
       context.ui.router.navigate({ type: "plugin", name: "tokscope" })
     }
 
-    const store = createWidgetStore({
-      client: context.client,
-      onEvent: (handler) => context.data.on("session.step.ended", handler),
-      setTimer: (callback, ms) => {
-        const id = setInterval(callback, ms)
-        return () => clearInterval(id)
-      },
-      now: () => Date.now(),
-    })
-
     // One durable namespace and one acquisition pipeline for every server and view. The hold lives
     // for the plugin, so the cache keeps catching up while OpenCode runs even with no page open.
     let unsubscribeEvents: (() => void) | undefined
@@ -53,6 +43,8 @@ export default Plugin.define({
       now: () => Date.now(),
     })
     const release = service.hold()
+    // The sidebar reads the same service and holds it while mounted, so both views share one cache.
+    const store = createWidgetStore(service)
 
     context.ui.router.register({
       name: "tokscope",

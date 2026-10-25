@@ -1,222 +1,102 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage } from "../src/metric"
-import type { HarvestClient } from "../src/harvest"
-import {
-  createWidgetStore,
-  WIDGET_REFRESH_MS,
-  type WidgetState,
-  type WidgetStoreDeps,
-} from "../src/sidebar/store"
+import { createSignal } from "solid-js"
+import type { HistoryService, WidgetSharedState } from "../src/history/service"
+import type { WidgetRow } from "../src/sidebar/rank"
+import { createWidgetStore } from "../src/sidebar/store"
 
-const HOUR_MS = 60 * 60 * 1000
-const NOW = 1_000_000_000_000
+const ROWS: WidgetRow[] = [{ key: "p/m", providerID: "p", modelID: "m", median: 40, calls: 3 }]
+const LOADING: WidgetSharedState = { status: "loading", rows: [], stale: false }
 
-type Page<T> = { data: T[]; cursor: { next?: string | null } }
-type SessionStub = { id: string; time: { created: number; updated: number } }
+/** Minimal stand-in for the shared service: the widget only reads its accessor and holds it. */
+function fakeService(initial: WidgetSharedState = LOADING) {
+  const [widget, setWidget] = createSignal<WidgetSharedState>(initial)
+  let holds = 0
+  let refreshes = 0
+  let onRefresh: (() => void) | undefined
 
-function measured(completed: number, rate: number): AssistantMessage {
-  return {
-    id: `msg_${completed}_${rate}`,
-    type: "assistant",
-    agent: "build",
-    model: { id: "m", providerID: "p" },
-    content: [],
-    time: { created: completed - 2_000, streamed: completed - 1_000, completed },
-    tokens: { input: 0, output: rate, reasoning: 0, cache: { read: 0, write: 0 } },
-  } as unknown as AssistantMessage
-}
-
-class FakeClient implements HarvestClient {
-  sessionCalls: NonNullable<Parameters<HarvestClient["session"]["list"]>[0]>[] = []
-  reject = false
-  delayMs = 0
-  messages: AssistantMessage[] = []
-
-  constructor(private sessions: SessionStub[] = [{ id: "s1", time: { created: 0, updated: NOW } }]) {}
-
-  session = {
-    list: async (input?: NonNullable<Parameters<HarvestClient["session"]["list"]>[0]>) => {
-      this.sessionCalls.push(input ?? {})
-      if (this.reject) throw new Error("read failed")
-      return { data: this.sessions, cursor: {} }
+  const service: HistoryService = {
+    view: () => () => {
+      throw new Error("the widget store never opens a view")
     },
-  }
-
-  message = {
-    list: async (input: Parameters<HarvestClient["message"]["list"]>[0]): Promise<Page<AssistantMessage>> => {
-      if (this.reject) throw new Error("read failed")
-      if (this.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.delayMs))
-      if (input.sessionID !== this.sessions[0]?.id) return { data: [], cursor: {} }
-      return { data: this.messages, cursor: {} }
-    },
-  }
-}
-
-function fakeDeps(client: HarvestClient, now = () => NOW) {
-  const handlers: (() => void)[] = []
-  const timers: { callback: () => void; ms: number }[] = []
-  let eventDetaches = 0
-  let timerDetaches = 0
-  const deps: WidgetStoreDeps = {
-    client,
-    onEvent: (handler) => {
-      handlers.push(handler)
+    widget: () => widget,
+    hold: () => {
+      holds += 1
+      let released = false
       return () => {
-        eventDetaches++
+        if (released) return
+        released = true
+        holds -= 1
       }
     },
-    setTimer: (callback, ms) => {
-      timers.push({ callback, ms })
-      return () => {
-        timerDetaches++
-      }
+    refreshNow: () => {
+      refreshes += 1
+      onRefresh?.()
     },
-    now,
+    reset: async () => {},
   }
+
   return {
-    deps,
-    handlers,
-    timers,
-    detaches: () => ({ eventDetaches, timerDetaches }),
+    service,
+    publish: setWidget,
+    current: widget,
+    holds: () => holds,
+    refreshes: () => refreshes,
+    /** Simulates the service publishing the outcome of a refresh on its own schedule. */
+    respondToRefresh: (handler: () => void) => {
+      onRefresh = handler
+    },
   }
 }
-
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10))
 
 describe("createWidgetStore", () => {
-  test("loads into ready with ranked rows", async () => {
-    const client = new FakeClient()
-    client.messages = [
-      measured(NOW - HOUR_MS, 40),
-      measured(NOW - 2 * HOUR_MS, 40),
-      measured(NOW - 3 * HOUR_MS, 40),
-    ]
-    const store = createWidgetStore(fakeDeps(client).deps)
+  test("passes the service's loading state through until its first publish", () => {
+    const fake = fakeService()
+    const store = createWidgetStore(fake.service)
 
     expect(store.state()).toEqual({ status: "loading", rows: [], stale: false })
 
-    await store.refresh()
+    fake.publish({ status: "ready", rows: ROWS, stale: false })
 
-    expect(store.state()).toEqual({
-      status: "ready",
-      rows: [{ key: "p/m", providerID: "p", modelID: "m", median: 40, calls: 3 }],
-      stale: false,
-    })
-    expect(client.sessionCalls).toHaveLength(1)
-    expect(client.sessionCalls[0].directory).toBeUndefined()
+    expect(store.state()).toEqual({ status: "ready", rows: ROWS, stale: false })
   })
 
-  test("applies the rolling 24h window end to end", async () => {
-    const client = new FakeClient()
-    client.messages = [
-      measured(NOW - 25 * HOUR_MS, 10),
-      measured(NOW - 26 * HOUR_MS, 20),
-      measured(NOW - 27 * HOUR_MS, 30),
-      measured(NOW - HOUR_MS, 50),
-      measured(NOW - 2 * HOUR_MS, 50),
-      measured(NOW - 3 * HOUR_MS, 50),
-    ]
-    const store = createWidgetStore(fakeDeps(client).deps)
+  test("forwards the service's rows unchanged", () => {
+    const fake = fakeService({ status: "ready", rows: ROWS, stale: false })
+    const store = createWidgetStore(fake.service)
 
-    await store.refresh()
-
-    expect(store.state().status).toBe("ready")
-    expect(store.state().rows.map((row) => row.calls)).toEqual([3])
-    expect(store.state().rows[0].median).toBe(50)
+    expect(store.state().rows).toBe(ROWS)
+    expect(store.state()).toBe(fake.current())
   })
 
-  test("distinguishes a first failure from an empty ranking", async () => {
-    const failing = new FakeClient()
-    failing.reject = true
-    const failedStore = createWidgetStore(fakeDeps(failing).deps)
+  test("reports the service's stale flag after a failed refresh", () => {
+    const fake = fakeService({ status: "ready", rows: ROWS, stale: false })
+    const store = createWidgetStore(fake.service)
+    fake.respondToRefresh(() => fake.publish({ status: "ready", rows: ROWS, stale: true }))
 
-    await failedStore.refresh()
+    store.refresh()
 
-    expect(failedStore.state()).toEqual({ status: "error", rows: [], stale: false })
-
-    const empty = new FakeClient()
-    empty.messages = [measured(NOW - HOUR_MS, 10), measured(NOW - 2 * HOUR_MS, 20)]
-    const emptyStore = createWidgetStore(fakeDeps(empty).deps)
-
-    await emptyStore.refresh()
-
-    expect(emptyStore.state()).toEqual({ status: "ready", rows: [], stale: false })
+    expect(store.state()).toEqual({ status: "ready", rows: ROWS, stale: true })
   })
 
-  test("marks retained rows stale on failure and recovers", async () => {
-    const client = new FakeClient()
-    client.messages = [
-      measured(NOW - HOUR_MS, 10),
-      measured(NOW - 2 * HOUR_MS, 20),
-      measured(NOW - 3 * HOUR_MS, 30),
-    ]
-    const store = createWidgetStore(fakeDeps(client).deps)
+  test("refresh asks the service to refresh", () => {
+    const fake = fakeService({ status: "ready", rows: ROWS, stale: false })
+    const store = createWidgetStore(fake.service)
 
-    await store.refresh()
-    const retained = store.state().rows
-    expect(retained).toHaveLength(1)
+    store.refresh()
 
-    client.reject = true
-    await store.refresh()
-
-    expect(store.state()).toEqual<WidgetState>({ status: "ready", rows: retained, stale: true })
-
-    client.reject = false
-    client.messages = [...client.messages, measured(NOW - 4 * HOUR_MS, 100)]
-    await store.refresh()
-
-    expect(store.state().stale).toBe(false)
-    expect(store.state().rows).toHaveLength(1)
-    expect(store.state().rows[0].median).toBe(25)
+    expect(fake.refreshes()).toBe(1)
   })
 
-  test("coalesces overlapping refreshes", async () => {
-    const client = new FakeClient()
-    client.delayMs = 10
-    client.messages = [
-      measured(NOW - HOUR_MS, 40),
-      measured(NOW - 2 * HOUR_MS, 40),
-      measured(NOW - 3 * HOUR_MS, 40),
-    ]
-    const store = createWidgetStore(fakeDeps(client).deps)
-
-    const first = store.refresh()
-    const second = store.refresh()
-    await Promise.all([first, second])
-
-    expect(client.sessionCalls).toHaveLength(2)
-    expect(store.state().status).toBe("ready")
-  })
-
-  test("attach wires event, timer, and initial load", async () => {
-    const client = new FakeClient()
-    client.messages = [
-      measured(NOW - HOUR_MS, 40),
-      measured(NOW - 2 * HOUR_MS, 40),
-      measured(NOW - 3 * HOUR_MS, 40),
-    ]
-    const fake = fakeDeps(client)
-    const store = createWidgetStore(fake.deps)
+  test("attach holds the service until cleanup releases it", () => {
+    const fake = fakeService()
+    const store = createWidgetStore(fake.service)
 
     const detach = store.attach()
 
-    expect(fake.handlers).toHaveLength(1)
-    expect(fake.timers).toHaveLength(1)
-    expect(fake.timers[0].ms).toBe(WIDGET_REFRESH_MS)
-    expect(client.sessionCalls).toHaveLength(1)
-
-    await flush()
-    expect(store.state().status).toBe("ready")
-
-    fake.handlers[0]()
-    await flush()
-    expect(client.sessionCalls).toHaveLength(2)
-
-    fake.timers[0].callback()
-    await flush()
-    expect(client.sessionCalls).toHaveLength(3)
+    expect(fake.holds()).toBe(1)
 
     detach()
-    expect(fake.detaches()).toEqual({ eventDetaches: 1, timerDetaches: 1 })
+
+    expect(fake.holds()).toBe(0)
   })
 })
