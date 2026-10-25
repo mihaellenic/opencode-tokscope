@@ -294,6 +294,9 @@ export function createHistoryService(deps: {
         directories.push(entry.request.directory)
       }
     }
+    // The sidebar holds the service before any page view exists. Its 24-hour all-project window is a
+    // read-time filter over shared records, so a hold with no view registers all-projects coverage.
+    if (directories.length === 0 && holds > 0) directories.push(undefined)
     return directories
   }
 
@@ -919,14 +922,13 @@ export function createHistoryService(deps: {
     })
   }
 
-  function hasViews(directory: string | undefined): boolean {
-    return viewsOf(directory).length > 0
-  }
-
-  /** Acquisition is background work: it starts only while a consumer holds the service. */
+  /** Acquisition is background work: it starts only while a consumer holds a requesting surface. */
   function schedulePass(directory: string | undefined): void {
-    if (holds === 0 || !hasViews(directory)) return
+    if (holds === 0) return
     void Promise.resolve().then(() => {
+      // Re-checked at run time so a view opened between scheduling and now supersedes the widget's
+      // all-project request instead of running two passes for the same cache.
+      if (holds === 0 || !requestedDirectories().some((requested) => requested === directory)) return
       ensurePass(directory)
     })
   }

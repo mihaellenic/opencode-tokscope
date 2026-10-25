@@ -62,6 +62,29 @@ describe("history service acquisition", () => {
     })
   })
 
+  test("a hold with no view drives all-project acquisition that publishes the widget", async () => {
+    const client = new FakeClient()
+    client.sessions = [
+      fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500), measured(NOW - 1_600), measured(NOW - 1_700)]),
+      fixture("ses_b", NOW - 2_000, [measured(NOW - 2_500)], "/work/b"),
+    ]
+    const clock = createClock(NOW)
+    const service = createService(client, createStore(), clock)
+    const release = service.hold()
+    await clock.settle()
+
+    // The sidebar-only hold lists every project and scans each session without a view ever opening.
+    expect(client.sessionCalls).toHaveLength(1)
+    expect(client.sessionCalls[0]?.directory).toBeUndefined()
+    expect(client.messageCalls.map((call) => call.sessionID).sort()).toEqual(["ses_a", "ses_b"])
+    expect(service.widget()()).toEqual({
+      status: "ready",
+      rows: [{ key: "p/m1", providerID: "p", modelID: "m1", median: 10, calls: 4 }],
+      stale: false,
+    })
+    release()
+  })
+
   test("warm view makes zero message-list calls", async () => {
     const client = new FakeClient()
     client.sessions = [
