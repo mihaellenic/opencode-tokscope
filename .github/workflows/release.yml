@@ -27,78 +27,12 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
-      prs_created: ${{ steps.release.outputs.prs_created }}
-      pr: ${{ steps.release.outputs.pr }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-  validate-release-pr:
-    needs: release-please
-    if: github.event_name == 'push' && needs.release-please.outputs.prs_created == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: write
-    steps:
-      - name: Dispatch read-only validation for the release PR head
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_PR: ${{ needs.release-please.outputs.pr }}
-          REQUEST_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          case "$REQUEST_ID" in
-            ""|*[!0-9-]*) echo "dispatch correlation token is malformed" >&2; exit 1 ;;
-          esac
-          if [ -z "$RELEASE_PR" ]; then
-            echo "release-please reported a created PR without PR metadata" >&2
-            exit 1
-          fi
-          pr=$(printf '%s' "$RELEASE_PR" | jq -r '.number // empty')
-          sha=$(printf '%s' "$RELEASE_PR" | jq -r '.sha // empty')
-          case "$pr" in
-            ""|*[!0-9]*) echo "release-please did not return a numeric PR number" >&2; exit 1 ;;
-          esac
-          if [ -z "$sha" ]; then
-            sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.head.sha // empty')
-          fi
-          case "$sha" in
-            ""|*[!0-9a-fA-F]*) echo "release-please did not return a hexadecimal head SHA" >&2; exit 1 ;;
-          esac
-          if [ "${#sha}" -ne 40 ]; then
-            echo "release-please returned a non-40-character head SHA" >&2
-            exit 1
-          fi
-          gh workflow run validate-release-pr.yml --ref main -f pr="$pr" -f head_sha="$sha" -f request_id="$REQUEST_ID"
-          expected_title="Validate release PR #$pr request $REQUEST_ID"
-          run_id=""
-          for attempt in $(seq 1 30); do
-            matches=$(gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/validate-release-pr.yml/runs?event=workflow_dispatch&per_page=100" \
-              | jq -r --arg title "$expected_title" '.workflow_runs[] | select(.display_title == $title) | .id')
-            count=$(printf '%s\n' "$matches" | grep -c '^[0-9][0-9]*$' || true)
-            if [ "$count" -eq 1 ]; then
-              run_id="$matches"
-              break
-            fi
-            if [ "$count" -gt 1 ]; then
-              echo "multiple validation runs match correlation token $REQUEST_ID" >&2
-              exit 1
-            fi
-            echo "waiting for the dispatched validation run (attempt $attempt/30)" >&2
-            sleep 5
-          done
-          if [ -z "$run_id" ]; then
-            echo "dispatched validation run did not appear within 150s" >&2
-            exit 1
-          fi
-          gh run watch "$run_id" --exit-status
 
   publish:
     needs: release-please

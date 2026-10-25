@@ -156,7 +156,7 @@ describe("release workflow security and gating", () => {
     expect(release).toContain("concurrency:\n  group: release\n  cancel-in-progress: false")
   })
 
-  test("pins the Node 24 release-please action and keeps its output wiring", () => {
+  test("pins the Node 24 release-please action and keeps its publishing outputs", () => {
     const job = jobBlock(release, "release-please")
     expect(job).toContain("uses: googleapis/release-please-action@v5")
     expect(job).not.toContain("googleapis/release-please-action@v4")
@@ -164,45 +164,42 @@ describe("release workflow security and gating", () => {
     expect(job).toContain("manifest-file: .release-please-manifest.json")
     expect(job).toContain("release_created: ${{ steps.release.outputs.release_created }}")
     expect(job).toContain("tag_name: ${{ steps.release.outputs.tag_name }}")
-    expect(job).toContain("prs_created: ${{ steps.release.outputs.prs_created }}")
-    expect(job).toContain("pr: ${{ steps.release.outputs.pr }}")
+    expect(job).not.toContain("prs_created")
+    expect(job).not.toContain("outputs.pr }}")
   })
 
-  test("dispatches read-only validation for the release PR output", () => {
-    expect(release).toContain("needs.release-please.outputs.pr")
-    expect(release).toContain("gh workflow run validate-release-pr.yml")
-    expect(release).toContain("GH_REPO: ${{ github.repository }}")
-    expect(release).toContain("gh run watch")
+  test("has no release PR dispatch path", () => {
+    expect(release).not.toContain("\n  validate-release-pr:\n")
+    expect(release).not.toContain("gh workflow run")
+    expect(release).not.toContain("gh run watch")
+    expect(release).not.toContain("actions: write")
+    expect(release).not.toContain("REQUEST_ID")
+    expect(release).not.toContain("request_id")
+    expect(release).not.toContain("prs_created")
+    expect(release).not.toContain("actions/workflows/validate-release-pr.yml/runs")
+    expect(release).not.toContain("head_sha")
+    expect(release).not.toContain("expected_title")
+
+    const dispatchInputs = release.slice(
+      release.indexOf("workflow_dispatch:"),
+      release.indexOf("\npermissions:"),
+    )
+    expect(dispatchInputs.match(/^ {6}[a-z0-9_-]+:$/gm)).toEqual(["      release_tag:"])
   })
 
-  test("never infers the dispatched run id from gh workflow run stdout", () => {
-    const dispatch = jobBlock(release, "validate-release-pr")
-    expect(dispatch).toContain("gh workflow run validate-release-pr.yml")
-    expect(dispatch).not.toContain("run_url=")
-    expect(dispatch).not.toContain("$(gh workflow run")
-    expect(dispatch).not.toContain("##*/")
-  })
-
-  test("correlates the dispatched run by a unique request token before watching", () => {
-    const dispatch = jobBlock(release, "validate-release-pr")
-    expect(dispatch).toContain('REQUEST_ID: ${{ github.run_id }}-${{ github.run_attempt }}')
-    expect(dispatch).toContain('-f request_id="$REQUEST_ID"')
-    expect(dispatch).toContain('expected_title="Validate release PR #$pr request $REQUEST_ID"')
-    expect(dispatch).toContain("actions/workflows/validate-release-pr.yml/runs?event=workflow_dispatch")
-    expect(dispatch).toContain("--arg title \"$expected_title\"")
-    expect(dispatch).toContain("select(.display_title == $title)")
-    expect(dispatch).toContain("seq 1 30")
-    expect(dispatch).not.toContain("createdAt")
-    expect(dispatch).toContain("multiple validation runs match correlation token")
-    expect(dispatch).toContain("did not appear within")
-    expect(dispatch.indexOf("select(.display_title == $title)")).toBeLessThan(dispatch.indexOf("gh run watch"))
-  })
-
-  test("fails visibly when release-please reports a created PR without metadata", () => {
-    const dispatch = jobBlock(release, "validate-release-pr")
-    expect(dispatch).toContain("needs.release-please.outputs.prs_created == 'true'")
-    expect(dispatch).not.toContain("needs.release-please.outputs.pr != ''")
-    expect(dispatch).toContain("release-please reported a created PR without PR metadata")
+  test("retains independent tagged artifact publishing", () => {
+    const publish = jobBlock(release, "publish")
+    expect(publish).toContain("needs: release-please")
+    expect(publish).toContain(
+      "if: always() && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch')",
+    )
+    expect(publish).toContain("ref: ${{ steps.resolve.outputs.tag }}")
+    expect(publish).toContain('bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"')
+    expect(publish).toContain('npm publish "$tarball" --access public')
+    expect(publish).toContain('--verify-published "$ARTIFACT_DIR/artifact.json"')
+    expect(publish).not.toContain("release-pr-evidence")
+    expect(release).not.toContain("release-pr-evidence")
+    expect(release).not.toContain("actions/download-artifact")
   })
 
   test("passes event and input values through env instead of shell interpolation", () => {
@@ -448,6 +445,45 @@ describe("release PR validation workflow", () => {
     const docs = read("docs/releasing.md")
     expect(docs).not.toContain("artifact, including on failure")
     expect(docs).toContain("whenever the acceptance step ran")
+  })
+
+  test("documents bot approval and the advisory native check", () => {
+    const docs = read("docs/releasing.md")
+    for (const line of [
+      "Approve workflows to run",
+      "`opened`, `synchronize`, and `reopened`",
+      "Validate release PR / release-pr-validation",
+      "not a required check",
+      "ruleset `main protection` (ID `25836446`)",
+      "no required status checks",
+      "pre-fix",
+    ]) {
+      expect(docs).toContain(line)
+    }
+    expect(docs).not.toContain("does **not** trigger `pull_request` workflows")
+    expect(docs).not.toContain("dispatches `.github/workflows/validate-release-pr.yml`")
+    expect(docs).not.toContain("no branch protection at all")
+    expect(docs).not.toContain("separate report job")
+  })
+
+  test("documents head-only freshness, diagnostic evidence, cache limits, and rollout", () => {
+    const docs = read("docs/releasing.md")
+    for (const line of [
+      "head and PR state at that check only",
+      "not the current base or merge result",
+      "unsigned and diagnostic",
+      "not a publishing attestation",
+      "per pull request, not per head",
+      "can read default-branch caches",
+      "independent of the PR evidence, not of the code on the tag",
+      "fix(ci): isolate release PR validation",
+      "gh pr close 1 --repo mihaellenic/opencode-tokscope",
+      "gh pr reopen 1 --repo mihaellenic/opencode-tokscope",
+      "does not verify bot triggering",
+      "Never revive the removed PR-code dispatch",
+    ]) {
+      expect(docs).toContain(line)
+    }
   })
 
   test("never executes PR code through pull_request_target", () => {
