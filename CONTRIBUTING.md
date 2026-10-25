@@ -25,6 +25,16 @@ ln -sfn /path/to/opencode-tokscope ~/.config/opencode/plugins/opencode-tokscope
 
 OpenCode picks up the link automatically where it can; if it does not, run `/reload`. A full restart is only needed when development dependencies outside OpenCode's watch set change. Rebuild and reload after source edits.
 
+`scripts/dev-opencode.sh` is a shorter alternative that does not touch your global config. It launches a `--standalone` OpenCode in a temporary project with a temporary config root that loads only this checkout's plugin, and rebuilds first. It reuses your real OpenCode data directory, so `/tokscope` shows actual session history:
+
+```bash
+scripts/dev-opencode.sh            # scratch project
+scripts/dev-opencode.sh ~/code/app # start in an existing project
+scripts/dev-opencode.sh --doctor   # preflight, build, and import checks only
+```
+
+Pass an existing project directory when you want the **Current project** filter to cover it. Since the isolated config root starts empty, global plugins, MCP servers, agents, and CLI settings are not loaded; provider credentials still come from the shared data directory.
+
 ```bash
 bun test          # unit tests (metric, harvest, aggregation, chart, state)
 bun run typecheck # tsc --noEmit (Bun.build strips types, so this is the type gate)
