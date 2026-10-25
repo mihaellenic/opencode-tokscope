@@ -503,6 +503,8 @@ describe("release PR validation workflow", () => {
     expect(docs).not.toContain("No acceptance evidence exists for this remediation")
     expect(docs).not.toContain("alerts 1–7 still open")
     expect(docs).not.toContain("b0977006")
+    expect(docs).not.toContain("disappears when the artifact expires")
+    expect(docs).not.toContain("an owner-approved run of a bot-created PR event")
     for (const line of [
       "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237780191",
       "`github-actions[bot]`",
@@ -522,6 +524,8 @@ describe("release PR validation workflow", () => {
       "controlled hosted negative-path runs (step 6)",
       "temporary test PR",
       "not an end-to-end hosted negative-path observation",
+      "local copy persists until it is manually removed",
+      "does not capture the original pending-approval screen",
       "release-pr-evidence-1-1",
       "registry-guard",
       "No publication, OIDC trusted-publishing smoke test",
