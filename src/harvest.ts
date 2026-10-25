@@ -137,10 +137,7 @@ export async function collectMeasurements(
         session.location.directory === options.directory),
   )
 
-  const samples: Sample[] = []
-  const unavailable: UnavailableSample[] = []
-  const inRangeAt = (completedAt: number) => options.fromMs === undefined || completedAt >= options.fromMs
-
+  const perSession: { samples: Sample[]; unavailable: UnavailableSample[] }[] = []
   let scanned = 0
   let nextSession = 0
   const concurrency = Math.max(1, Math.min(options.concurrency ?? DEFAULT_CONCURRENCY, inRange.length))
@@ -149,32 +146,21 @@ export async function collectMeasurements(
     while (true) {
       const index = nextSession++
       if (index >= inRange.length) return
-      const session = inRange[index]
-
-      let messageCursor: string | undefined
-      do {
-        const page = await client.message.list(
-          messageCursor === undefined
-            ? { sessionID: session.id, limit: MESSAGE_PAGE_SIZE, order: "desc", type: "assistant" }
-            : { sessionID: session.id, limit: MESSAGE_PAGE_SIZE, type: "assistant", cursor: messageCursor },
-        )
-        for (const message of page.data) {
-          if (message.type !== "assistant") continue
-          if (session.fork !== undefined && message.time.created < session.time.created) continue
-          const result = classifyAssistant(message)
-          if (result.kind === "measured" && inRangeAt(result.sample.completedAt)) samples.push(result.sample)
-          else if (result.kind === "unavailable" && inRangeAt(result.sample.completedAt))
-            unavailable.push(result.sample)
-        }
-        messageCursor = page.cursor.next ?? undefined
-      } while (messageCursor !== undefined)
-
+      perSession[index] = await scanMessages(client, inRange[index])
       scanned++
       options.onProgress?.({ sessionsScanned: scanned })
     }
   }
 
   await Promise.all(Array.from({ length: concurrency }, worker))
+
+  const { samples, unavailable } = inRangeSamples(
+    {
+      samples: perSession.flatMap((entry) => entry.samples),
+      unavailable: perSession.flatMap((entry) => entry.unavailable),
+    },
+    options.fromMs,
+  )
 
   return { samples, unavailable, variants: collectVariants(samples, unavailable) }
 }
