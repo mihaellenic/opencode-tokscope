@@ -156,6 +156,18 @@ describe("release workflow security and gating", () => {
     expect(release).toContain("concurrency:\n  group: release\n  cancel-in-progress: false")
   })
 
+  test("pins the Node 24 release-please action and keeps its output wiring", () => {
+    const job = jobBlock(release, "release-please")
+    expect(job).toContain("uses: googleapis/release-please-action@v5")
+    expect(job).not.toContain("googleapis/release-please-action@v4")
+    expect(job).toContain("config-file: release-please-config.json")
+    expect(job).toContain("manifest-file: .release-please-manifest.json")
+    expect(job).toContain("release_created: ${{ steps.release.outputs.release_created }}")
+    expect(job).toContain("tag_name: ${{ steps.release.outputs.tag_name }}")
+    expect(job).toContain("prs_created: ${{ steps.release.outputs.prs_created }}")
+    expect(job).toContain("pr: ${{ steps.release.outputs.pr }}")
+  })
+
   test("dispatches read-only validation for the release PR output", () => {
     expect(release).toContain("needs.release-please.outputs.pr")
     expect(release).toContain("gh workflow run validate-release-pr.yml")
