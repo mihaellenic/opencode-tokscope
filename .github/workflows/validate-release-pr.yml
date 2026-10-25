@@ -1,61 +1,53 @@
 name: Validate release PR
-run-name: 'Validate release PR #${{ inputs.pr }} request ${{ inputs.request_id }}'
+run-name: 'Validate release PR #${{ github.event.pull_request.number }}'
 on:
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: Release PR number
-        required: true
-        type: string
-      head_sha:
-        description: Exact release PR head commit SHA
-        required: true
-        type: string
-      request_id:
-        description: Correlation token from the dispatching release run
-        required: true
-        type: string
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-release-pr-${{ inputs.pr }}
+  group: validate-release-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   validate:
+    name: release-pr-validation
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
-    outputs:
-      acceptance: ${{ steps.evidence.outputs.acceptance || 'not-run' }}
-      artifact: ${{ steps.evidence.outputs.artifact || 'unavailable' }}
-      audit: ${{ steps.evidence.outputs.audit || 'unavailable' }}
     steps:
       - name: Validate PR identity through the GitHub API
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ inputs.pr }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          REQUEST_ID: ${{ inputs.request_id }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EVENT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          case "$REQUEST_ID" in
-            ""|*[!0-9-]*) echo "request_id must contain only digits and hyphens" >&2; exit 1 ;;
-          esac
           case "$PR" in
             ""|*[!0-9]*) echo "pr must be numeric" >&2; exit 1 ;;
           esac
           case "$HEAD_SHA" in
-            ""|*[!0-9a-fA-F]*) echo "head_sha must be hexadecimal" >&2; exit 1 ;;
+            ""|*[!0-9a-fA-F]*) echo "event head SHA must be hexadecimal" >&2; exit 1 ;;
           esac
           if [ "${#HEAD_SHA}" -ne 40 ]; then
-            echo "head_sha must be a full 40-character SHA" >&2
+            echo "event head SHA must be a full 40-character SHA" >&2
             exit 1
           fi
+          for event_value in "$EVENT_HEAD_REPO" "$EVENT_HEAD_REF" "$EVENT_BASE_REF" "$GITHUB_REPOSITORY"; do
+            if [ -z "$event_value" ]; then
+              echo "event identity is incomplete" >&2
+              exit 1
+            fi
+          done
           pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR")
           actual_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
           state=$(printf '%s' "$pr_json" | jq -r '.state // empty')
@@ -66,7 +58,10 @@ jobs:
           test "$actual_sha" = "$HEAD_SHA"
           test "$state" = "open"
           test "$base_ref" = "main"
+          test "$base_ref" = "$EVENT_BASE_REF"
           test "$head_repo" = "$GITHUB_REPOSITORY"
+          test "$head_repo" = "$EVENT_HEAD_REPO"
+          test "$head_ref" = "$EVENT_HEAD_REF"
           case "$head_ref" in
             release-please--*) ;;
             *) echo "release PR head branch is not a release-please branch" >&2; exit 1 ;;
@@ -82,12 +77,13 @@ jobs:
 
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.head_sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify the checked-out commit
         env:
-          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
@@ -128,7 +124,7 @@ jobs:
         id: subjects
         env:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           subjects=$(git log --format='%s' "$BASE_SHA..$HEAD_SHA")
@@ -148,11 +144,50 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
         run: bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"
 
+      - name: Verify current PR head
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
+        run: |
+          set -euo pipefail
+          expected_sha="$HEAD_SHA"
+          observed_sha=""
+          pr_state=""
+          outcome=unverified
+          mkdir -p "$ARTIFACT_DIR"
+          if pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"); then
+            observed_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
+            pr_state=$(printf '%s' "$pr_json" | jq -r '.state // empty')
+            if [ "$pr_state" = "closed" ]; then
+              outcome=closed
+            elif [ -z "$observed_sha" ]; then
+              outcome=unverified
+            elif [ "$observed_sha" = "$expected_sha" ]; then
+              outcome=current
+            else
+              outcome=stale
+            fi
+          fi
+          jq -n \
+            --arg expected_sha "$expected_sha" \
+            --arg observed_sha "$observed_sha" \
+            --arg pr_state "$pr_state" \
+            --arg outcome "$outcome" \
+            '{expected_sha: $expected_sha, observed_sha: (if $observed_sha == "" then null else $observed_sha end), pr_state: (if $pr_state == "" then null else $pr_state end), outcome: $outcome}' \
+            > "$ARTIFACT_DIR/head-status.json"
+          if [ "$outcome" != "current" ]; then
+            echo "release PR head is not current ($outcome): expected $expected_sha, observed ${observed_sha:-<unavailable>}" >&2
+            exit 1
+          fi
+
       - name: Preserve acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
+          name: release-pr-evidence-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tokscope-release-pr
           if-no-files-found: warn
           retention-days: 14
@@ -161,21 +196,27 @@ jobs:
         id: evidence
         if: always()
         env:
-          HEAD_SHA: ${{ inputs.head_sha }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACCEPTANCE: ${{ steps.accept.outcome || 'not-run' }}
           INSTALL: ${{ steps.install.outcome || 'not-run' }}
           TYPECHECK: ${{ steps.typecheck.outcome || 'not-run' }}
           TEST: ${{ steps.test.outcome || 'not-run' }}
           BUILD: ${{ steps.build.outcome || 'not-run' }}
           SUBJECTS: ${{ steps.subjects.outcome || 'not-run' }}
+          FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}
           ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
-          EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
+          EVIDENCE_ARTIFACT: release-pr-evidence-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          acceptance=${ACCEPTANCE:-not-run}
+          freshness=${FRESHNESS:-not-run}
           artifact=not-produced
           artifact_detail="no accepted artifact was preserved"
           audit=not-run
           audit_detail="the consumer audit did not run"
+          head_outcome=not-run
+          head_detail="the live PR head check did not run because an earlier step failed"
 
           if [ -f "$ARTIFACT_DIR/artifact.json" ]; then
             if jq -e '(.name | type) == "string" and (.version | type) == "string" and (.filename | type) == "string" and (.integrity | type) == "string"' \
@@ -200,7 +241,7 @@ jobs:
               if [ "$high" -gt 0 ] || [ "$critical" -gt 0 ]; then
                 audit=blocking
                 audit_detail="blocking high=$high critical=$critical advisories in the raw consumer audit"
-              elif [ "$ACCEPTANCE" = "success" ]; then
+              elif [ "$acceptance" = "success" ]; then
                 audit=no-high-critical
                 audit_detail="no high/critical advisories in the raw consumer audit"
               else
@@ -213,8 +254,38 @@ jobs:
             fi
           fi
 
+          if [ -f "$ARTIFACT_DIR/head-status.json" ]; then
+            recorded_outcome=$(jq -r '.outcome // "unverified"' "$ARTIFACT_DIR/head-status.json")
+            expected_sha=$(jq -r '.expected_sha // empty' "$ARTIFACT_DIR/head-status.json")
+            observed_sha=$(jq -r '.observed_sha // empty' "$ARTIFACT_DIR/head-status.json")
+            pr_state=$(jq -r '.pr_state // empty' "$ARTIFACT_DIR/head-status.json")
+            case "$recorded_outcome" in
+              current)
+                if [ "$freshness" = "success" ]; then
+                  head_outcome=current
+                  head_detail="PR #$PR is open at the validated head"
+                else
+                  head_outcome=unverified
+                  head_detail="a current snapshot exists but the freshness step did not succeed"
+                fi
+                ;;
+              stale)
+                head_outcome=stale
+                head_detail="PR #$PR head moved from $expected_sha to ${observed_sha:-<unavailable>}; this validation is stale"
+                ;;
+              closed)
+                head_outcome=closed
+                head_detail="PR #$PR is ${pr_state:-closed}; the validated head is no longer current"
+                ;;
+              *)
+                head_outcome=unverified
+                head_detail="the live PR head could not be verified (state: ${pr_state:-unavailable})"
+                ;;
+            esac
+          fi
+
           {
-            echo "acceptance=$ACCEPTANCE"
+            echo "acceptance=$acceptance"
             echo "artifact=$artifact"
             echo "audit=$audit"
           } >> "$GITHUB_OUTPUT"
@@ -224,10 +295,11 @@ jobs:
             echo ""
             echo "Prerequisites for head \`$HEAD_SHA\`: install=$INSTALL typecheck=$TYPECHECK test=$TEST build=$BUILD subjects=$SUBJECTS"
             echo ""
-            echo "Artifact acceptance (preflight, registry guard, pack, consumer audit): **$ACCEPTANCE**"
+            echo "Artifact acceptance (preflight, registry guard, pack, consumer audit): **$acceptance**"
             echo ""
             echo "- Artifact: $artifact_detail"
             echo "- Audit: $audit_detail"
+            echo "- Head freshness: **$head_outcome** — $head_detail"
             echo "- Evidence artifact: \`$EVIDENCE_ARTIFACT\`"
             echo ""
             echo "Acceptance covers the artifact only; it does not verify publication."
@@ -235,93 +307,37 @@ jobs:
               echo ""
               echo "**Audit exception applied — this is NOT a clean audit.**"
             fi
+            if [ "$head_outcome" = "not-run" ]; then
+              echo ""
+              echo "**Head freshness is not-run: do not treat this run as a successful validation.**"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  report:
-    needs: validate
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      pull-requests: read
-    steps:
-      - name: Publish the validation check on the release PR head
+      - name: Require accepted evidence
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ inputs.pr }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          RESULT: ${{ needs.validate.result }}
-          ACCEPTANCE: ${{ needs.validate.outputs.acceptance }}
-          ARTIFACT: ${{ needs.validate.outputs.artifact }}
-          AUDIT: ${{ needs.validate.outputs.audit }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}
+          ACCEPTANCE: ${{ steps.evidence.outputs.acceptance || 'not-run' }}
+          ARTIFACT: ${{ steps.evidence.outputs.artifact || 'unavailable' }}
+          AUDIT: ${{ steps.evidence.outputs.audit || 'unverified' }}
+          FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}
         run: |
           set -euo pipefail
-          conclusion=failure
-          if [ "$RESULT" = "success" ] && [ "$ACCEPTANCE" = "success" ] && [ "$ARTIFACT" = "accepted" ]; then
-            case "$AUDIT" in
-              exception-applied|no-high-critical) conclusion=success ;;
-            esac
-          fi
-          title="Release PR validation failed ($ACCEPTANCE)"
-          case "$ACCEPTANCE" in
-            success)
-              if [ "$conclusion" = "success" ]; then
-                title="Release PR validation passed"
-              else
-                title="Release PR validation failed after artifact acceptance"
-              fi
-              ;;
-            skipped|not-run)
-              title="Release PR validation failed before artifact acceptance"
-              ;;
-            failure)
-              case "$AUDIT" in
-                blocking) title="Release PR artifact audit failed" ;;
-                unusable) title="Release PR artifact audit could not be evaluated" ;;
-                *) title="Release PR artifact acceptance failed" ;;
-              esac
-              ;;
-          esac
-          case "$ARTIFACT" in
-            accepted) artifact_status="accepted artifact preserved as evidence" ;;
-            not-produced) artifact_status="no accepted artifact was preserved" ;;
-            *) artifact_status="artifact status unavailable" ;;
-          esac
-          case "$AUDIT" in
-            exception-applied) audit_status="scoped audit exception applied; NOT a clean audit (see accepted-audit-exceptions.json)" ;;
-            no-high-critical) audit_status="raw consumer audit reported no high/critical advisories" ;;
-            blocking) audit_status="blocking high/critical advisories reported" ;;
-            unusable) audit_status="raw consumer audit report absent or unusable" ;;
-            unverified) audit_status="raw consumer audit report present but not confirmed by acceptance" ;;
-            *) audit_status="consumer audit did not run" ;;
-          esac
-          if [ "$conclusion" = "success" ]; then
-            outcome_line="Artifact accepted for publication. This check does not verify publication."
-          else
-            outcome_line="Validation did not pass. Acceptance covers the artifact only; it does not verify publication."
-          fi
-          summary=$(printf '%s\n' \
-            "Release PR validation result: $RESULT" \
-            "" \
-            "- Artifact acceptance: $ACCEPTANCE" \
-            "- Artifact: $artifact_status" \
-            "- Audit: $audit_status" \
-            "- Evidence artifact: $EVIDENCE_ARTIFACT" \
-            "" \
-            "Dispatched validation run: $RUN_URL" \
-            "$outcome_line")
-          actual_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.head.sha // empty')
-          if [ "$actual_sha" != "$HEAD_SHA" ]; then
-            echo "release PR head moved from $HEAD_SHA to ${actual_sha:-<unavailable>}; refusing to publish a stale validation check" >&2
+          acceptance=${ACCEPTANCE:-not-run}
+          artifact=${ARTIFACT:-unavailable}
+          audit=${AUDIT:-unverified}
+          freshness=${FRESHNESS:-not-run}
+          if [ "$acceptance" != "success" ]; then
+            echo "artifact acceptance did not succeed: $acceptance" >&2
             exit 1
           fi
-          jq -n \
-            --arg sha "$HEAD_SHA" \
-            --arg conclusion "$conclusion" \
-            --arg title "$title" \
-            --arg summary "$summary" \
-            --arg details_url "$RUN_URL" \
-            '{name: "release-pr-validation", head_sha: $sha, status: "completed", conclusion: $conclusion, details_url: $details_url, output: {title: $title, summary: $summary}}' \
-            | gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input -
+          if [ "$artifact" != "accepted" ]; then
+            echo "no accepted artifact evidence: $artifact" >&2
+            exit 1
+          fi
+          case "$audit" in
+            exception-applied|no-high-critical) ;;
+            *) echo "consumer audit is not acceptable: $audit" >&2; exit 1 ;;
+          esac
+          if [ "$freshness" != "success" ]; then
+            echo "current PR head was not verified: $freshness" >&2
+            exit 1
+          fi

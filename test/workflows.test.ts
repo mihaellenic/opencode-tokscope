@@ -212,28 +212,80 @@ describe("release workflow security and gating", () => {
 })
 
 describe("release PR validation workflow", () => {
-  test("is workflow_dispatch with required PR identity inputs", () => {
-    expect(validate).toContain("workflow_dispatch:")
-    expect(validate).toContain("        required: true")
-    expect(validate).toContain("head_sha:")
-    expect(validate).toContain("pr:")
-    expect(validate).toContain("request_id:")
+  test("executes release PR code only on pull_request", () => {
     expect(validate).toContain(
-      "run-name: 'Validate release PR #${{ inputs.pr }} request ${{ inputs.request_id }}'",
+      "on:\n  pull_request:\n    branches: [main]\n    types: [opened, synchronize, reopened]",
     )
-    expect(validate).toContain("inputs.request_id")
-    expect(validate).toContain('case "$REQUEST_ID" in')
+    for (const forbidden of [
+      "workflow_dispatch",
+      "pull_request_target",
+      "repository_dispatch",
+      "workflow_run",
+      "push:",
+    ]) {
+      expect(validate).not.toContain(forbidden)
+    }
+    const validateJob = jobBlock(validate, "validate")
+    expect(validateJob).toContain("name: release-pr-validation")
+    expect(validateJob).toContain(
+      "if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--')",
+    )
+    expect(validate).toContain(
+      "concurrency:\n  group: validate-release-pr-${{ github.event.pull_request.number }}\n  cancel-in-progress: false",
+    )
+    expect(validate).toContain(
+      "run-name: 'Validate release PR #${{ github.event.pull_request.number }}'",
+    )
+    expect(validate).not.toContain("inputs.")
+    expect(validate).not.toContain("request_id")
+    expect(validate).not.toContain("REQUEST_ID")
   })
 
-  test("validates the PR number and exact head SHA through the API", () => {
-    expect(validate).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"')
-    expect(validate).toContain('test "$actual_sha" = "$HEAD_SHA"')
-    expect(validate).toContain('test "$state" = "open"')
-    expect(validate).toContain('test "$base_ref" = "main"')
-    expect(validate).toContain('test "$head_repo" = "$GITHUB_REPOSITORY"')
-    expect(validate).toContain("release-please--*")
-    expect(validate).toContain("ref: ${{ inputs.head_sha }}")
-    expect(validate).toContain('test "$(git rev-parse HEAD)" = "$HEAD_SHA"')
+  test("uses the event head rather than the merge SHA", () => {
+    const validateJob = jobBlock(validate, "validate")
+    expect(validateJob).toContain("ref: ${{ github.event.pull_request.head.sha }}")
+    expect(validateJob).toContain("persist-credentials: false")
+    expect(validateJob).not.toContain("github.sha")
+    expect(validateJob).not.toContain("refs/pull/")
+    expect(validateJob).toContain("HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
+    expect(validateJob).toContain('test "$(git rev-parse HEAD)" = "$HEAD_SHA"')
+    expect(validateJob).toContain("fetch-depth: 0")
+  })
+
+  test("validates the live PR identity before checkout", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const precheck = validateJob.indexOf("Validate PR identity through the GitHub API")
+    const checkout = validateJob.indexOf("actions/checkout@v5")
+    expect(precheck).toBeGreaterThan(-1)
+    expect(precheck).toBeLessThan(checkout)
+    expect(validateJob).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"')
+    expect(validateJob).toContain('test "$actual_sha" = "$HEAD_SHA"')
+    expect(validateJob).toContain('test "$state" = "open"')
+    expect(validateJob).toContain('test "$base_ref" = "main"')
+    expect(validateJob).toContain("release-please--*")
+    expect(validateJob).toContain("EVENT_HEAD_REPO:")
+    expect(validateJob).toContain("EVENT_HEAD_REF:")
+    expect(validateJob).toContain("EVENT_BASE_REF:")
+  })
+
+  test("keeps all validation jobs read-only", () => {
+    const validateJob = jobBlock(validate, "validate")
+    expect(validate).toContain("permissions:\n  contents: read")
+    expect(validateJob).toContain("permissions:\n      contents: read\n      pull-requests: read")
+    for (const forbidden of [
+      "checks: write",
+      "actions: write",
+      "contents: write",
+      "pull-requests: write",
+      "id-token",
+      "security-events",
+      "secrets.",
+    ]) {
+      expect(validateJob).not.toContain(forbidden)
+    }
+    expect(validate).not.toContain("\n  report:\n")
+    expect(validate).not.toContain("check-runs")
+    expect(validateJob).not.toContain("outputs:")
   })
 
   test("runs the same quality and subject gates as CI", () => {
@@ -243,17 +295,6 @@ describe("release PR validation workflow", () => {
     expect(validate).toContain("bun run build")
     expect(validate).toContain("scripts/commit-subject-ok.sh")
     expect(validate).toContain('git log --format=\'%s\' "$BASE_SHA..$HEAD_SHA"')
-  })
-
-  test("keeps validation read-only and scopes check publishing", () => {
-    const validateJob = jobBlock(validate, "validate")
-    const reportJob = jobBlock(validate, "report")
-    expect(validateJob).toContain("permissions:\n      contents: read")
-    expect(validateJob).not.toContain("contents: write")
-    expect(validateJob).not.toContain("pull-requests: write")
-    expect(reportJob).toContain("permissions:\n      checks: write\n      pull-requests: read")
-    expect(reportJob).toContain("check-runs")
-    expect(reportJob).toContain("needs.validate.result")
   })
 
   test("sets up Node and pins npm before artifact acceptance", () => {
@@ -273,13 +314,15 @@ describe("release PR validation workflow", () => {
 
   test("accepts the checked-out head artifact after the CI gates with no bypass", () => {
     const validateJob = jobBlock(validate, "validate")
-    const checkout = validateJob.indexOf("ref: ${{ inputs.head_sha }}")
+    const precheck = validateJob.indexOf("Validate PR identity through the GitHub API")
+    const checkout = validateJob.indexOf("ref: ${{ github.event.pull_request.head.sha }}")
     const build = validateJob.indexOf("bun run build")
     const subjects = validateJob.indexOf("scripts/commit-subject-ok.sh")
     const acceptance = validateJob.indexOf(
       'bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"',
     )
-    expect(checkout).toBeGreaterThan(-1)
+    expect(precheck).toBeGreaterThan(-1)
+    expect(precheck).toBeLessThan(checkout)
     expect(checkout).toBeLessThan(acceptance)
     expect(build).toBeLessThan(acceptance)
     expect(subjects).toBeLessThan(acceptance)
@@ -310,7 +353,7 @@ describe("release PR validation workflow", () => {
     )
     expect(evidenceStep).toContain("if: always()")
     expect(evidenceStep).toContain(
-      "name: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}",
+      "name: release-pr-evidence-${{ github.event.pull_request.number }}-${{ github.run_attempt }}",
     )
     expect(evidenceStep).toContain("path: ${{ runner.temp }}/tokscope-release-pr")
     expect(evidenceStep).toContain("if-no-files-found: warn")
@@ -318,78 +361,85 @@ describe("release PR validation workflow", () => {
     expect(evidenceStep).not.toContain("continue-on-error")
   })
 
-  test("exposes acceptance, artifact, and audit outcomes with fail-safe defaults", () => {
+  test("preserves acceptance and audit failure summaries", () => {
     const validateJob = jobBlock(validate, "validate")
-    expect(validateJob).toContain(
-      "acceptance: ${{ steps.evidence.outputs.acceptance || 'not-run' }}",
-    )
-    expect(validateJob).toContain("artifact: ${{ steps.evidence.outputs.artifact || 'unavailable' }}")
-    expect(validateJob).toContain("audit: ${{ steps.evidence.outputs.audit || 'unavailable' }}")
+    const acceptance = validateJob.indexOf("release-acceptance.ts --output-dir")
+    const freshness = validateJob.indexOf("Verify current PR head")
+    const upload = validateJob.indexOf("Preserve acceptance evidence")
+    const summary = validateJob.indexOf("Summarize validation and acceptance evidence")
+    const gate = validateJob.indexOf("Require accepted evidence")
+    expect(acceptance).toBeLessThan(freshness)
+    expect(freshness).toBeLessThan(upload)
+    expect(upload).toBeLessThan(summary)
+    expect(summary).toBeLessThan(gate)
+
+    const uploadStep = validateJob.slice(upload, summary)
+    const summaryStep = validateJob.slice(summary, gate)
+    const gateStep = validateJob.slice(gate)
+    expect(uploadStep).toContain("if: always()")
+    expect(summaryStep).toContain("if: always()")
+    expect(gateStep).not.toContain("if: always()")
+    for (const line of [
+      "Prerequisites for head",
+      "preflight",
+      "no accepted artifact was preserved",
+      "NOT a clean audit",
+      "blocking high=",
+      "audit=unverified",
+      "Head freshness",
+      "does not verify publication",
+    ]) {
+      expect(summaryStep).toContain(line)
+    }
+    expect(validateJob).not.toContain("continue-on-error")
+    expect(validateJob).not.toContain("|| true")
+  })
+
+  test("checks live head before successful completion", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const acceptance = validateJob.indexOf("release-acceptance.ts --output-dir")
+    const freshness = validateJob.indexOf("name: Verify current PR head")
+    const upload = validateJob.indexOf("Preserve acceptance evidence")
+    const gate = validateJob.indexOf("Require accepted evidence")
+    expect(freshness).toBeGreaterThan(acceptance)
+    expect(freshness).toBeLessThan(upload)
+    expect(upload).toBeLessThan(gate)
+
+    const freshnessStep = validateJob.slice(freshness, upload)
+    expect(freshnessStep).toContain("id: freshness")
+    expect(freshnessStep).toContain("head-status.json")
+    expect(freshnessStep).toContain("outcome=unverified")
+    expect(freshnessStep).toContain("stale")
+    expect(freshnessStep).toContain("closed")
+    expect(validateJob).toContain("FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}")
+  })
+
+  test("requires exact evidence with fail-safe defaults before succeeding", () => {
+    const validateJob = jobBlock(validate, "validate")
+    const gate = validateJob.slice(validateJob.indexOf("Require accepted evidence"))
+    expect(gate).toContain("ACCEPTANCE: ${{ steps.evidence.outputs.acceptance || 'not-run' }}")
+    expect(gate).toContain("ARTIFACT: ${{ steps.evidence.outputs.artifact || 'unavailable' }}")
+    expect(gate).toContain("AUDIT: ${{ steps.evidence.outputs.audit || 'unverified' }}")
+    expect(gate).toContain("FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}")
+    expect(gate).toContain("exception-applied|no-high-critical")
+    expect(gate).toContain('"$acceptance" != "success"')
+    expect(gate).toContain('"$artifact" != "accepted"')
+    expect(gate).toContain('"$freshness" != "success"')
+  })
+
+  test("keeps acceptance, artifact, audit, and freshness outcomes distinct", () => {
+    const validateJob = jobBlock(validate, "validate")
     expect(validateJob).toContain("ACCEPTANCE: ${{ steps.accept.outcome || 'not-run' }}")
+    expect(validateJob).toContain("FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}")
+    expect(validateJob).toContain("acceptance=$acceptance")
+    expect(validateJob).toContain("artifact=$artifact")
+    expect(validateJob).toContain("audit=$audit")
     expect(validateJob).toContain("$GITHUB_STEP_SUMMARY")
-    expect(validateJob).toContain("Prerequisites for head")
-    expect(validateJob).toContain("preflight")
-    expect(validateJob).toContain("NOT a clean audit")
-    expect(validateJob).toContain("audit=unverified")
     expect(validateJob).not.toContain("publish verified")
     expect(validateJob).not.toContain("publication verified")
-    expect(validateJob).toContain("does not verify publication")
   })
 
-  test("rechecks the PR head before publishing the validation check", () => {
-    const report = jobBlock(validate, "report")
-    expect(report).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"')
-    expect(report).toContain('if [ "$actual_sha" != "$HEAD_SHA" ]')
-    expect(report).toContain("refusing to publish a stale validation check")
-    expect(report.indexOf("pulls/$PR")).toBeLessThan(report.indexOf("check-runs"))
-  })
-
-  test("links the check run to the dispatched validation run", () => {
-    const report = jobBlock(validate, "report")
-    expect(report).toContain(
-      "RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-    )
-    expect(report).toContain('--arg details_url "$RUN_URL"')
-    expect(report).toContain("details_url: $details_url")
-    expect(report).toContain("Dispatched validation run: $RUN_URL")
-    expect(report.indexOf('"$RUN_URL"')).toBeLessThan(report.indexOf("check-runs"))
-  })
-
-  test("reports artifact and audit status from the validate job outputs", () => {
-    const report = jobBlock(validate, "report")
-    expect(report).toContain("ACCEPTANCE: ${{ needs.validate.outputs.acceptance }}")
-    expect(report).toContain("ARTIFACT: ${{ needs.validate.outputs.artifact }}")
-    expect(report).toContain("AUDIT: ${{ needs.validate.outputs.audit }}")
-    expect(report).toContain(
-      "EVIDENCE_ARTIFACT: release-pr-evidence-${{ inputs.pr }}-${{ github.run_attempt }}",
-    )
-    expect(report).toContain("Artifact: $artifact_status")
-    expect(report).toContain("Audit: $audit_status")
-    expect(report).toContain("unverified) audit_status=")
-    expect(report).toContain("NOT a clean audit")
-  })
-
-  test("keeps failed audit, generic failure, and unreached acceptance distinct", () => {
-    const report = jobBlock(validate, "report")
-    expect(report).toContain('title="Release PR artifact audit failed"')
-    expect(report).toContain('title="Release PR artifact acceptance failed"')
-    expect(report).toContain('title="Release PR validation failed before artifact acceptance"')
-    expect(report).toContain("skipped|not-run")
-    expect(report).toContain("blocking")
-  })
-
-  test("marks the check successful only when validation and acceptance passed", () => {
-    const report = jobBlock(validate, "report")
-    expect(report).toContain(
-      'if [ "$RESULT" = "success" ] && [ "$ACCEPTANCE" = "success" ] && [ "$ARTIFACT" = "accepted" ]',
-    )
-    expect(report).toContain("exception-applied|no-high-critical) conclusion=success")
-    expect(report).toContain("conclusion=failure")
-    expect(report).not.toContain("conclusion=neutral")
-    expect(report).not.toContain("continue-on-error")
-  })
-
-  test("passes inputs through env in validation and reporting steps", () => {
+  test("passes event values through env in validation steps", () => {
     expect(runBlocks(validate).length).toBeGreaterThan(0)
     for (const block of runBlocks(validate)) expect(block).not.toContain("${{")
   })
