@@ -25,7 +25,7 @@ const RANGE_OPTIONS: { title: string; value: RangeFilter }[] = [
   { title: "All history", value: "all" },
 ]
 
-const HELP_LINE = "↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back · ctrl+p reset history"
+const HELP_LINE = "↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back · reset history in palette"
 
 export function TokscopePage(props: {
   context: Plugin.Context
