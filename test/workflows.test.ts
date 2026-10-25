@@ -486,6 +486,18 @@ describe("release PR validation workflow", () => {
     }
   })
 
+  test("documents the run summary separately from the evidence artifact", () => {
+    const docs = read("docs/releasing.md")
+    expect(docs).toContain("**Summary** tab and logs")
+    expect(docs).toContain("human-readable acceptance, audit, and head-freshness summary")
+    expect(docs).toContain("human-readable summary is not part of the artifact directory")
+    expect(docs).toContain("`artifact.json`")
+    expect(docs).toContain("`npm-audit-omit-dev.json`")
+    expect(docs).toContain("`accepted-audit-exceptions.json`")
+    expect(docs).toContain("`head-status.json`")
+    expect(docs).not.toContain("raw audit, acceptance summary, and `head-status.json`")
+  })
+
   test("never executes PR code through pull_request_target", () => {
     for (const workflow of [ci, release, validate]) {
       expect(workflow).not.toContain("pull_request_target")
