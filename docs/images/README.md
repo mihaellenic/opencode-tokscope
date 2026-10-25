@@ -31,5 +31,5 @@ Open the generated HTML file in Chrome, set the viewport to 1406 × 688,
 and save a viewport PNG to `tokscope-overview.png`. No external resources or
 server are required. Review both PNGs after regenerating.
 
-The root README embeds `docs/images/` by relative path. For npm, use public hosted image URLs after these assets
-are pushed: the current npm artifact does not include `docs/images/`. Local development lives in `CONTRIBUTING.md`.
+The root README embeds `docs/images/` via absolute `raw.githubusercontent.com/main` URLs so both GitHub and
+npm render them; the npm artifact still does not include `docs/images/`. Local development lives in `CONTRIBUTING.md`.

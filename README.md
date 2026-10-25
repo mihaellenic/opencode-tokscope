@@ -8,9 +8,9 @@ Tokscope is an OpenCode V2 terminal UI plugin with:
 - A daily median trend for the selected pair, with project, time-range, and reasoning-setting filters.
 - A clickable sidebar summary of the fastest pairs over the last 24 hours.
 
-![Real OpenCode session with the Tokscope widget in the sidebar: fastest model/provider pairs over the last 24 hours](docs/images/tokscope-sidebar.png)
+![Real OpenCode session with the Tokscope widget in the sidebar: fastest model/provider pairs over the last 24 hours](https://raw.githubusercontent.com/mihaellenic/opencode-tokscope/main/docs/images/tokscope-sidebar.png)
 
-![Model/provider comparison and daily trend — synthetic mockup](docs/images/tokscope-overview.png)
+![Model/provider comparison and daily trend — synthetic mockup](https://raw.githubusercontent.com/mihaellenic/opencode-tokscope/main/docs/images/tokscope-overview.png)
 
 ## Install
 
