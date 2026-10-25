@@ -1,13 +1,14 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createMemo, createResource, createSignal, Match, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, Match, Show, Switch } from "solid-js"
 import { DEFAULT_FILTERS, rangeStartMs, type Filters, type RangeFilter, type ScopeFilter } from "../filters"
 import { formatCoverage, modelDisplayName } from "../format"
-import { collectMeasurements } from "../harvest"
+import type { HistoryService, ViewState } from "../history/service"
 import { applyReasoningFilter, comparisonRows, dailySeries, type ReasoningFilter } from "../stats"
 import { Header, rangeLabel, reasoningLabel } from "./header"
+import { bannerMessage, footerStatusSuffix } from "./heading-status"
 import { nextSelection } from "./selection"
-import { pickPageState, type PageState } from "./state"
+import { pickViewPageState, type PageState } from "./state"
 import { EmptyState, ErrorState, LoadingState, UnmeasurableState } from "./states"
 import { ComparisonTable } from "./table"
 import { TrendPanel } from "./trend"
@@ -24,50 +25,51 @@ const RANGE_OPTIONS: { title: string; value: RangeFilter }[] = [
   { title: "All history", value: "all" },
 ]
 
-export function TokscopePage(props: { context: Plugin.Context; onClose: () => void }) {
+const HELP_LINE = "↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back · reset history in palette"
+
+export function TokscopePage(props: {
+  context: Plugin.Context
+  service: HistoryService
+  onClose: () => void
+}) {
   const theme = props.context.theme
   const dimensions = useTerminalDimensions()
-  const openedAt = Date.now()
 
   void props.context.data.location.model.sync()
   void props.context.data.location.provider.sync()
 
   const [filters, setFilters] = createSignal<Filters>({ ...DEFAULT_FILTERS })
-  const [scanned, setScanned] = createSignal(0)
   const [selectedKey, setSelectedKey] = createSignal<string | undefined>(undefined)
   const [selectedDay, setSelectedDay] = createSignal(0)
 
   const directory = () =>
     props.context.location?.directory ?? props.context.data.location.default().directory
 
-  const [result, { refetch }] = createResource(
-    () => `${filters().scope}:${filters().range}`,
-    async (key) => {
-      const [scope, range] = key.split(":") as [ScopeFilter, RangeFilter]
-      setScanned(0)
-      return collectMeasurements(props.context.client, {
-        directory: scope === "project" ? directory() : undefined,
-        fromMs: rangeStartMs(range, openedAt),
-        onProgress: (info) => setScanned(info.sessionsScanned),
-      })
-    },
+  /**
+   * One reactive read of the shared cache for the current filters: filter changes, background
+   * publications, and every timer tick of the plugin-lifetime hold all land here.
+   */
+  const state = (): ViewState =>
+    props.service.view({
+      directory: filters().scope === "project" ? directory() : undefined,
+      range: filters().range,
+    })()
+
+  /** Trend windows advance with the last completed check rather than with page-open time. */
+  const referenceNow = () => state().lastCheckedAt ?? Date.now()
+
+  const filtered = createMemo(() =>
+    applyReasoningFilter(state().samples, state().unavailable, filters().reasoning),
   )
 
-  const filtered = createMemo(() => {
-    const value = result()
-    if (value === undefined) return { samples: [], unavailable: [] }
-    return applyReasoningFilter(value.samples, value.unavailable, filters().reasoning)
-  })
-
-  const pageState = createMemo<PageState>(() => {
-    if (result.loading) return "loading"
-    return pickPageState({ error: result.error }, filtered().samples, filtered().unavailable)
-  })
+  const pageState = createMemo<PageState>(() => pickViewPageState(state()))
 
   const rows = createMemo(() => comparisonRows(filtered().samples, filtered().unavailable))
 
   createEffect(() => {
     const list = rows()
+    // Background publications must not steal the selection: only an absent row is re-selected.
+    if (list.some((row) => row.key === selectedKey())) return
     setSelectedKey(list[0]?.key)
   })
 
@@ -85,14 +87,23 @@ export function TokscopePage(props: { context: Plugin.Context; onClose: () => vo
   const series = createMemo(() => {
     const key = selectedKey()
     if (key === undefined) return []
-    return dailySeries(filtered().samples, key, rangeStartMs(filters().range, openedAt), openedAt)
+    const nowMs = referenceNow()
+    return dailySeries(filtered().samples, key, rangeStartMs(filters().range, nowMs), nowMs)
   })
 
+  /** The row key the current day anchor belongs to; a change re-anchors, a publication does not. */
+  let anchoredKey: string | undefined
+
   createEffect(() => {
-    selectedKey()
+    const key = selectedKey()
     const points = series()
+    const current = selectedDay()
+    // Background publications must not steal the day: only a changed row or a day index that fell
+    // out of the (possibly shorter) series re-anchors; an unchanged row keeps its day.
+    if (key === anchoredKey && current < points.length) return
     const last = points.findLastIndex((point) => point.calls > 0)
     setSelectedDay(last === -1 ? Math.max(0, points.length - 1) : last)
+    anchoredKey = key
   })
 
   const moveDay = (delta: number) =>
@@ -114,10 +125,9 @@ export function TokscopePage(props: { context: Plugin.Context; onClose: () => vo
 
   const reasoningOptions = () => {
     const options: { title: string; value: ReasoningFilter }[] = [{ title: "All settings", value: "all" }]
-    const value = result()
-    for (const variant of value?.variants ?? []) options.push({ title: variant, value: variant })
-    const hasUnknown =
-      value !== undefined && [...value.samples, ...value.unavailable].some((item) => item.variant === undefined)
+    const value = state()
+    for (const variant of value.variants) options.push({ title: variant, value: variant })
+    const hasUnknown = [...value.samples, ...value.unavailable].some((item) => item.variant === undefined)
     if (hasUnknown) options.push({ title: "unknown", value: "unknown" })
     return options
   }
@@ -165,7 +175,8 @@ export function TokscopePage(props: { context: Plugin.Context; onClose: () => vo
         bind: "enter",
         title: "retry",
         run: () => {
-          if (pageState() === "error") void refetch()
+          // A failed refresh over retained rows keeps the cache on screen; both are retryable.
+          if (state().kind === "error") props.service.refreshNow()
         },
       },
     ],
@@ -187,10 +198,18 @@ export function TokscopePage(props: { context: Plugin.Context; onClose: () => vo
     >
       <Header context={props.context} filters={filters()} />
 
+      <Show when={bannerMessage(state())}>
+        {(message) => (
+          <text fg={state().kind === "error" ? theme.text.feedback.error.base : theme.text.muted}>
+            {message()}
+          </text>
+        )}
+      </Show>
+
       <box flexGrow={1} flexDirection="column" gap={1}>
         <Switch>
           <Match when={pageState() === "loading"}>
-            <LoadingState context={props.context} sessions={scanned()} />
+            <LoadingState context={props.context} sessions={state().scanned} />
           </Match>
           <Match when={pageState() === "error"}>
             <ErrorState context={props.context} />
@@ -224,9 +243,7 @@ export function TokscopePage(props: { context: Plugin.Context; onClose: () => vo
         </Switch>
       </box>
 
-      <text fg={theme.text.muted}>
-        {"↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back" + coverage()}
-      </text>
+      <text fg={theme.text.muted}>{HELP_LINE + coverage() + footerStatusSuffix(state())}</text>
     </box>
   )
 }

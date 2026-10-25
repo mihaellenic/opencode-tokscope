@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage } from "../src/metric"
-import { collectMeasurements, type HarvestClient } from "../src/harvest"
+import type { AssistantMessage, Sample, UnavailableSample } from "../src/metric"
+import {
+  collectMeasurements,
+  collectVariants,
+  inRangeSamples,
+  listSessions,
+  scanMessages,
+  type HarvestClient,
+} from "../src/harvest"
 import { median } from "../src/stats"
 
 type SessionFork = { sessionID: string; boundary: { type: "before" | "through"; messageID: string } }
@@ -70,6 +77,21 @@ const tokens = (input: number, output: number, reasoning: number) => ({
 
 const measured = (overrides: AssistantOverrides = {}) =>
   assistant({ created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(100, 50, 50), ...overrides })
+
+const sampleAt = (completedAt: number, variant?: string): Sample => ({
+  providerID: "anthropic",
+  modelID: "claude-sonnet-4",
+  variant,
+  rate: 10,
+  completedAt,
+})
+
+const unavailableAt = (completedAt: number, variant?: string): UnavailableSample => ({
+  providerID: "anthropic",
+  modelID: "claude-sonnet-4",
+  variant,
+  completedAt,
+})
 
 class FakeClient implements HarvestClient {
   sessionCalls: NonNullable<Parameters<HarvestClient["session"]["list"]>[0]>[] = []
@@ -220,6 +242,37 @@ describe("collectMeasurements", () => {
     expect(result.samples).toHaveLength(1)
   })
 
+  test("propagates errors", async () => {
+    const client = new FakeClient(pages([session("s1", 0, 100)]), { s1: pages([measured()]) })
+    client.rejectMessages = true
+
+    await expect(collectMeasurements(client, {})).rejects.toThrow("boom")
+  })
+})
+
+describe("scanMessages", () => {
+  test("returns complete session measurements without range filtering", async () => {
+    const client = new FakeClient([], {
+      s1: pages(
+        [measured({ completed: 5_000 }), measured({ completed: 12_000 })],
+        [measured({ completed: 30_000 })],
+      ),
+    })
+
+    const result = await scanMessages(client, session("s1", 0, 40_000))
+
+    expect(result.samples.map((sample) => sample.completedAt)).toEqual([5_000, 12_000, 30_000])
+    expect(result.unavailable).toHaveLength(0)
+    expect(client.messageCalls[0]).toMatchObject({
+      sessionID: "s1",
+      limit: 200,
+      order: "desc",
+      type: "assistant",
+    })
+    expect(client.messageCalls[1].cursor).toBe("c1")
+    expect(client.messageCalls[1].order).toBeUndefined()
+  })
+
   test("excludes inherited fork copies", async () => {
     const parentTen = {
       created: 0,
@@ -227,66 +280,153 @@ describe("collectMeasurements", () => {
       completed: 11_000,
       tokens: tokens(0, 100, 0),
     }
-    const client = new FakeClient(
-      pages([
-        session("s1", 0, 20_000),
-        session("s2", 20_000, 30_000, undefined, {
-          sessionID: "s1",
-          boundary: { type: "through", messageID: "m1" },
-        }),
+    const client = new FakeClient([], {
+      s1: pages([
+        measured(parentTen),
+        measured({ created: 0, streamed: 1_000, completed: 2_000, tokens: tokens(0, 100, 0) }),
       ]),
-      {
-        s1: pages([
-          measured(parentTen),
-          measured({ created: 0, streamed: 1_000, completed: 2_000, tokens: tokens(0, 100, 0) }),
-        ]),
-        s2: pages([measured(parentTen)]),
-      },
+      s2: pages([measured(parentTen)]),
+    })
+
+    const parent = await scanMessages(client, session("s1", 0, 20_000))
+    const fork = await scanMessages(
+      client,
+      session("s2", 20_000, 30_000, undefined, {
+        sessionID: "s1",
+        boundary: { type: "through", messageID: "m1" },
+      }),
     )
+    const samples = [...parent.samples, ...fork.samples]
 
-    const result = await collectMeasurements(client, {})
-
-    expect(result.samples.map((sample) => sample.rate).sort((a, b) => a - b)).toEqual([10, 100])
-    expect(median(result.samples.map((sample) => sample.rate))).toBe(55)
+    expect(samples.map((sample) => sample.rate).sort((a, b) => a - b)).toEqual([10, 100])
+    expect(median(samples.map((sample) => sample.rate))).toBe(55)
   })
 
   test("counts new requests created in the fork", async () => {
-    const client = new FakeClient(
-      pages([
-        session("s2", 5_000, 30_000, undefined, {
-          sessionID: "s1",
-          boundary: { type: "through", messageID: "m1" },
-        }),
+    const client = new FakeClient([], {
+      s2: pages([
+        measured({ created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }),
+        measured({ created: 5_000, streamed: 6_000, completed: 7_000, tokens: tokens(25, 25, 0) }),
       ]),
-      {
-        s2: pages([
-          measured({ created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }),
-          measured({ created: 5_000, streamed: 6_000, completed: 7_000, tokens: tokens(25, 25, 0) }),
-        ]),
-      },
-    )
+    })
 
-    const result = await collectMeasurements(client, {})
+    const result = await scanMessages(
+      client,
+      session("s2", 5_000, 30_000, undefined, {
+        sessionID: "s1",
+        boundary: { type: "through", messageID: "m1" },
+      }),
+    )
 
     expect(result.samples).toHaveLength(1)
     expect(result.samples[0].completedAt).toBe(7_000)
   })
 
+  test("aborts on a repeated cursor", async () => {
+    const repeated: Page<AssistantMessage>[] = [
+      { data: [measured()], cursor: { next: "c1" } },
+      { data: [measured()], cursor: { next: "c1" } },
+    ]
+    const client = new FakeClient([], { s1: repeated })
+
+    await expect(scanMessages(client, session("s1", 0, 100))).rejects.toThrow(/repeated cursor/)
+    expect(client.messageCalls.length).toBeLessThanOrEqual(3)
+  })
+
   test("counts independent identical requests in non-fork sessions", async () => {
     const identical = { created: 1_000, streamed: 2_000, completed: 2_500, tokens: tokens(50, 50, 0) }
-    const client = new FakeClient(pages([session("s1", 0, 20_000)]), {
-      s1: pages([measured(identical), measured(identical)]),
-    })
+    const client = new FakeClient([], { s1: pages([measured(identical), measured(identical)]) })
 
-    const result = await collectMeasurements(client, {})
+    const result = await scanMessages(client, session("s1", 0, 20_000))
 
     expect(result.samples).toHaveLength(2)
   })
+})
 
-  test("propagates errors", async () => {
-    const client = new FakeClient(pages([session("s1", 0, 100)]), { s1: pages([measured()]) })
-    client.rejectMessages = true
+describe("listSessions", () => {
+  test("stops listing at the time boundary when a full page is stale", async () => {
+    const client = new FakeClient(
+      pages(
+        [session("fresh", 0, 5_000)],
+        [session("stale-1", 0, 1_000), session("stale-2", 0, 1_500)],
+        [session("older", 0, 500)],
+      ),
+    )
 
-    await expect(collectMeasurements(client, {})).rejects.toThrow("boom")
+    const result = await listSessions(client, { fromMs: 2_000 })
+
+    expect(client.sessionCalls).toHaveLength(2)
+    expect(client.messageCalls).toHaveLength(0)
+    expect(result.sessions.map((entry) => entry.id)).toEqual(["fresh", "stale-1", "stale-2"])
+    expect(result.boundaryReached).toBe(true)
+  })
+
+  test("continues past a mixed boundary page", async () => {
+    const client = new FakeClient(
+      pages(
+        [session("fresh", 0, 5_000)],
+        [session("mixed-fresh", 0, 3_000), session("mixed-stale", 0, 1_000)],
+        [session("older", 0, 500)],
+      ),
+    )
+
+    const result = await listSessions(client, { fromMs: 2_000 })
+
+    expect(client.sessionCalls).toHaveLength(3)
+    expect(result.boundaryReached).toBe(true)
+  })
+
+  test("aborts on a repeated cursor", async () => {
+    const repeated: Page<SessionStub>[] = [
+      { data: [session("s1", 0, 100)], cursor: { next: "c1" } },
+      { data: [session("s2", 0, 90)], cursor: { next: "c1" } },
+    ]
+    const client = new FakeClient(repeated)
+
+    await expect(listSessions(client, {})).rejects.toThrow(/repeated cursor/)
+    expect(client.sessionCalls.length).toBeLessThanOrEqual(3)
+  })
+
+  test("reads every page for unbounded history", async () => {
+    const client = new FakeClient(pages([session("s1", 0, 5_000)], [session("s2", 0, 1_000)]))
+
+    const result = await listSessions(client, {})
+
+    expect(client.sessionCalls).toHaveLength(2)
+    expect(client.sessionCalls[0]).toMatchObject({ limit: 100, order: "desc" })
+    expect(client.sessionCalls[1].cursor).toBe("c1")
+    expect(client.sessionCalls[1].order).toBeUndefined()
+    expect(result.sessions.map((entry) => entry.id)).toEqual(["s1", "s2"])
+    expect(result.boundaryReached).toBe(true)
+  })
+})
+
+describe("inRangeSamples", () => {
+  test("filters both sample kinds below the range and leaves unbounded reads intact", () => {
+    const result = {
+      samples: [sampleAt(1_000), sampleAt(3_000, "high")],
+      unavailable: [unavailableAt(500)],
+    }
+
+    const bounded = inRangeSamples(result, 2_000)
+
+    expect(bounded.samples.map((sample) => sample.completedAt)).toEqual([3_000])
+    expect(bounded.unavailable).toHaveLength(0)
+
+    const unbounded = inRangeSamples(result, undefined)
+
+    expect(unbounded.samples).toHaveLength(2)
+    expect(unbounded.unavailable).toHaveLength(1)
+  })
+})
+
+describe("collectVariants", () => {
+  test("returns sorted unique variants across samples and unavailable", () => {
+    const variants = collectVariants(
+      [sampleAt(1_000, "high"), sampleAt(2_000), sampleAt(3_000, "low")],
+      [unavailableAt(4_000, "high")],
+    )
+
+    expect(variants).toEqual(["high", "low"])
   })
 })
