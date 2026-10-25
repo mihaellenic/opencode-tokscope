@@ -144,49 +144,6 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/tokscope-release-pr
         run: bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"
 
-      - name: "Controlled test: wait for head movement"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          echo "GITHUB_EVENT_NAME=${GITHUB_EVENT_NAME:-unavailable} GITHUB_REF=${GITHUB_REF:-unavailable}"
-          case "$EXPECTED_HEAD" in
-            ""|*[!0-9a-fA-F]*) echo "expected head SHA must be hexadecimal" >&2; exit 1 ;;
-          esac
-          if [ "${#EXPECTED_HEAD}" -ne 40 ]; then
-            echo "expected head SHA must be a full 40-character SHA" >&2
-            exit 1
-          fi
-          attempt=0
-          while [ "$attempt" -lt 300 ]; do
-            attempt=$((attempt + 1))
-            observed=""
-            if pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" 2>/dev/null); then
-              candidate=""
-              if candidate=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty' 2>/dev/null); then
-                case "$candidate" in
-                  ""|*[!0-9a-fA-F]*) ;;
-                  *)
-                    if [ "${#candidate}" -eq 40 ]; then
-                      observed=$candidate
-                    fi
-                    ;;
-                esac
-              fi
-            fi
-            if [ -n "$observed" ] && [ "$observed" != "$EXPECTED_HEAD" ]; then
-              echo "PR head moved: expected $EXPECTED_HEAD, observed $observed (attempt $attempt)"
-              exit 0
-            fi
-            if [ "$attempt" -lt 300 ]; then
-              sleep 2
-            fi
-          done
-          echo "timed out after 300 attempts waiting for PR head to move away from $EXPECTED_HEAD" >&2
-          exit 1
-
       - name: Verify current PR head
         id: freshness
         env:
