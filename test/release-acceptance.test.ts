@@ -417,18 +417,24 @@ const APPROVED_ADVISORIES = [
 ]
 
 const pinnedVersions = new Map(Object.entries(SEROVAL_AUDIT_EXCEPTION.versions))
+pinnedVersions.set(SEROVAL_AUDIT_EXCEPTION.root, "0.1.0")
+
+const defaultRoot = { name: SEROVAL_AUDIT_EXCEPTION.root, version: "0.1.0" }
 
 const cloneChain = (): AuditReport => structuredClone(serovalChain)
+
+type RootPackage = { name: string; version: string }
 
 function decide(
   report: unknown,
   now: string,
-  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException } = {},
+  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException; root?: RootPackage } = {},
 ) {
   return auditExceptionDecision({
     report,
     versions: options.versions ?? pinnedVersions,
     now: new Date(now),
+    root: options.root ?? defaultRoot,
     exception: options.exception,
   })
 }
@@ -436,7 +442,7 @@ function decide(
 function blockedDetail(
   report: unknown,
   now = "2026-11-06T12:00:00Z",
-  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException } = {},
+  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException; root?: RootPackage } = {},
 ): string {
   const decision = decide(report, now, options)
   expect(decision.allowed).toBe(false)
@@ -455,6 +461,44 @@ describe("scoped audit exception", () => {
     )
   })
 
+  test("binds the root package version to the current artifact version", () => {
+    const versions = new Map(pinnedVersions)
+    versions.set(SEROVAL_AUDIT_EXCEPTION.root, "0.1.1")
+    const decision = decide(serovalChain, "2026-11-06T12:00:00Z", {
+      versions,
+      root: { name: SEROVAL_AUDIT_EXCEPTION.root, version: "0.1.1" },
+    })
+    expect(decision.allowed).toBe(true)
+    if (!decision.allowed) throw new Error(decision.detail)
+    expect(decision.applied).toBe(true)
+  })
+
+  test("rejects mismatched installed and manifest root versions", () => {
+    const installedDrift = new Map(pinnedVersions)
+    installedDrift.set(SEROVAL_AUDIT_EXCEPTION.root, "0.1.0")
+    expect(
+      blockedDetail(serovalChain, undefined, {
+        versions: installedDrift,
+        root: { name: SEROVAL_AUDIT_EXCEPTION.root, version: "0.1.1" },
+      }),
+    ).toContain("does not match the current artifact version 0.1.1")
+
+    const manifestDrift = new Map(pinnedVersions)
+    manifestDrift.set(SEROVAL_AUDIT_EXCEPTION.root, "0.1.1")
+    expect(
+      blockedDetail(serovalChain, undefined, {
+        versions: manifestDrift,
+        root: { name: SEROVAL_AUDIT_EXCEPTION.root, version: "0.1.0" },
+      }),
+    ).toContain("does not match the current artifact version 0.1.0")
+
+    expect(
+      blockedDetail(serovalChain, undefined, {
+        root: { name: "some-other-package", version: "0.1.0" },
+      }),
+    ).toContain("root package")
+  })
+
   test("allows a clean report even after the exception expires", () => {
     const decision = decide(JSON.parse(zeroAudit), "2027-01-01T00:00:00Z")
     expect(decision.allowed).toBe(true)
@@ -471,6 +515,12 @@ describe("scoped audit exception", () => {
   test("fails closed on an invalid exception even when the advisories match", () => {
     const invalid = { ...SEROVAL_AUDIT_EXCEPTION, expiresAt: "not-a-timestamp" }
     expect(blockedDetail(serovalChain, undefined, { exception: invalid })).toContain("invalid")
+
+    const literalRoot = {
+      ...SEROVAL_AUDIT_EXCEPTION,
+      versions: { ...SEROVAL_AUDIT_EXCEPTION.versions, [SEROVAL_AUDIT_EXCEPTION.root]: "0.1.0" },
+    }
+    expect(blockedDetail(serovalChain, undefined, { exception: literalRoot })).toContain("literal")
   })
 
   test("rejects a new advisory even when approved advisories remain on seroval", () => {
@@ -569,7 +619,7 @@ describe("scoped audit exception", () => {
 
   test("writes separate evidence with expiry and a residual-risk warning", () => {
     const now = new Date("2026-11-06T12:00:00Z")
-    const decision = auditExceptionDecision({ report: serovalChain, versions: pinnedVersions, now })
+    const decision = auditExceptionDecision({ report: serovalChain, versions: pinnedVersions, now, root: defaultRoot })
     if (!decision.allowed) throw new Error(decision.detail)
     const evidence = auditExceptionEvidence(decision, pinnedVersions, now)
     const text = JSON.stringify(evidence)

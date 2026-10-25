@@ -4,9 +4,12 @@
  * This is deliberately not a package-level or severity-wide waiver. It applies
  * only to the exact advisory URLs below, on the exact dependency chain and
  * resolved versions observed in the production consumer lockfile on
- * 2026-10-24. The policy gate still runs only after `summarizeAudit` has
- * validated the whole report; any new advisory, package, edge, version,
- * cycle, unresolved via reference, or malformed data fails closed.
+ * 2026-10-24. The root package version is injected from the current artifact
+ * manifest, so a release version bump does not require rewriting the waiver;
+ * every vulnerable/transitive version stays pinned exactly. The policy gate
+ * still runs only after `summarizeAudit` has validated the whole report; any
+ * new advisory, package, edge, version, cycle, unresolved via reference, or
+ * malformed data fails closed.
  *
  * The exception is not a clean audit. docs/releasing.md §4.1 records the
  * reachability assessment, residual risk, and the review/removal date.
@@ -30,7 +33,9 @@ export interface AuditException {
   ownerAuthorization: string
   rationale: string
   advisories: readonly AuditExceptionAdvisory[]
-  /** Exact resolved versions from the real production consumer lockfile. */
+  /** The released package; its version must match the current artifact manifest. */
+  root: string
+  /** Exact resolved versions for the vulnerable/transitive components. */
   versions: Readonly<Record<string, string>>
   /** Assessed chain: package -> transitive packages named in its `via` strings. */
   edges: Readonly<Record<string, readonly string[]>>
@@ -47,8 +52,8 @@ export const SEROVAL_AUDIT_EXCEPTION: AuditException = {
     { package: "seroval", name: "seroval", url: ADVISORY_P6VX, severity: "critical" },
     { package: "seroval", name: "seroval", url: ADVISORY_JP82, severity: "high" },
   ],
+  root: "opencode-tokscope",
   versions: {
-    "opencode-tokscope": "0.1.0",
     "@opencode/plugin": "2.1.2",
     "@opentui/solid": "0.6.8",
     "solid-js": "1.9.12",
@@ -118,6 +123,13 @@ function exceptionProblems(exception: AuditException, now: Date): string[] {
   if (!exception.id.trim()) problems.push("id is empty")
   if (!exception.ownerAuthorization.trim()) problems.push("owner authorization is missing")
   if (!exception.rationale.trim()) problems.push("rationale is missing")
+  if (!exception.root.trim()) problems.push("root package is missing")
+  if (exception.versions[exception.root] !== undefined) {
+    problems.push(`root package ${exception.root} must use the current artifact version, not a literal pin`)
+  }
+  if (exception.edges[exception.root] === undefined) {
+    problems.push(`root package ${exception.root} has no assessed edges`)
+  }
 
   const expiry = Date.parse(exception.expiresAt)
   if (!Number.isFinite(expiry)) {
@@ -138,7 +150,7 @@ function exceptionProblems(exception: AuditException, now: Date): string[] {
     if (advisory.severity !== "high" && advisory.severity !== "critical") {
       problems.push(`advisory ${advisory.url} has an unsupported severity`)
     }
-    if (exception.versions[advisory.package] === undefined) {
+    if (advisory.package !== exception.root && exception.versions[advisory.package] === undefined) {
       problems.push(`advisory package ${advisory.package} has no pinned version`)
     }
   }
@@ -150,9 +162,13 @@ function exceptionProblems(exception: AuditException, now: Date): string[] {
     if (exception.edges[name] === undefined) problems.push(`pinned package ${name} has no assessed edges`)
   }
   for (const [name, deps] of Object.entries(exception.edges)) {
-    if (exception.versions[name] === undefined) problems.push(`assessed package ${name} has no pinned version`)
+    if (name !== exception.root && exception.versions[name] === undefined) {
+      problems.push(`assessed package ${name} has no pinned version`)
+    }
     for (const dep of deps) {
-      if (exception.versions[dep] === undefined) problems.push(`assessed edge ${name} -> ${dep} has no pinned version`)
+      if (dep !== exception.root && exception.versions[dep] === undefined) {
+        problems.push(`assessed edge ${name} -> ${dep} has no pinned version`)
+      }
     }
   }
   return problems
@@ -164,6 +180,8 @@ function exceptionProblems(exception: AuditException, now: Date): string[] {
  */
 export function auditExceptionDecision(input: {
   report: unknown
+  /** Current accepted artifact manifest identity, not a literal baseline. */
+  root: { name: string; version: string }
   versions: ReadonlyMap<string, string>
   now: Date
   exception?: AuditException
@@ -188,6 +206,13 @@ export function auditExceptionDecision(input: {
     if (problems.length > 0) {
       return { allowed: false, detail: `audit exception is invalid: ${problems.join("; ")}` }
     }
+    if (input.root.name !== exception.root) {
+      return {
+        allowed: false,
+        detail: `root package ${input.root.name} does not match exception root ${exception.root}`,
+      }
+    }
+    if (!input.root.version.trim()) return { allowed: false, detail: "current artifact version is missing" }
 
     const approved = new Map(exception.advisories.map((advisory) => [advisory.url, advisory]))
     const memo = new Map<string, string[]>()
@@ -200,12 +225,17 @@ export function auditExceptionDecision(input: {
 
       const entry = entries.get(name)
       if (!entry) throw new Error(`via reference to ${name} is unresolved`)
-      const expectedVersion = exception.versions[name]
+      const isRoot = name === exception.root
+      const expectedVersion = isRoot ? input.root.version : exception.versions[name]
       if (expectedVersion === undefined) throw new Error(`package ${name} is not on the assessed chain`)
       const installedVersion = input.versions.get(name)
       if (installedVersion === undefined) throw new Error(`no resolved version for ${name}`)
       if (installedVersion !== expectedVersion) {
-        throw new Error(`${name}@${installedVersion} is outside the pinned ${expectedVersion}`)
+        throw new Error(
+          isRoot
+            ? `root package ${name}@${installedVersion} does not match the current artifact version ${expectedVersion}`
+            : `${name}@${installedVersion} is outside the pinned ${expectedVersion}`,
+        )
       }
 
       const allowedDeps = exception.edges[name]
@@ -276,6 +306,7 @@ export interface AuditExceptionEvidence {
     expiresAt: string
     ownerAuthorization: string
     rationale: string
+    rootPackage: string
     advisories: AuditExceptionAdvisory[]
   }
   appliedTo: {
@@ -301,6 +332,7 @@ export function auditExceptionEvidence(
       expiresAt: exception.expiresAt,
       ownerAuthorization: exception.ownerAuthorization,
       rationale: exception.rationale,
+      rootPackage: exception.root,
       advisories: exception.advisories.map((advisory) => ({ ...advisory })),
     },
     appliedTo: {

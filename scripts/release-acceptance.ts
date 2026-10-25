@@ -816,8 +816,16 @@ function runAcceptance(options: Extract<AcceptanceOptions, { mode: "accept" }>):
       let versions: Map<string, string>
       let decision: AuditExceptionDecision
       try {
-        versions = readConsumerVersions(consumer, Object.keys(SEROVAL_AUDIT_EXCEPTION.versions))
-        decision = auditExceptionDecision({ report: parseAuditJson(audit.stdout), versions, now })
+        versions = readConsumerVersions(consumer, [
+          name,
+          ...Object.keys(SEROVAL_AUDIT_EXCEPTION.versions),
+        ])
+        decision = auditExceptionDecision({
+          report: parseAuditJson(audit.stdout),
+          root: { name, version },
+          versions,
+          now,
+        })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         throw new AcceptanceFailure(
