@@ -521,14 +521,56 @@ describe("release PR validation workflow", () => {
       "https://github.com/mihaellenic/opencode-tokscope/issues/2",
       "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237738234",
       "alerts 1–7 were `fixed`",
-      "controlled hosted negative-path runs (step 6)",
-      "temporary test PR",
-      "not an end-to-end hosted negative-path observation",
       "local copy persists until it is manually removed",
       "does not capture the original pending-approval screen",
       "release-pr-evidence-1-1",
       "registry-guard",
       "No publication, OIDC trusted-publishing smoke test",
+    ]) {
+      expect(docs).toContain(line)
+    }
+  })
+
+  test("records hosted negative-path rejection evidence and its limits", () => {
+    const docs = read("docs/releasing.md")
+    expect(docs).not.toContain("controlled hosted negative-path runs (step 6)")
+    expect(docs).not.toContain("not an end-to-end hosted negative-path observation")
+    for (const line of [
+      "Hosted negative-path rejection tests (2026-10-25)",
+      "controlled test branches, not actual release forks or malicious-fork proof",
+      "https://github.com/mihaellenic/opencode-tokscope/pull/8",
+      "https://github.com/mihaellenic/opencode-tokscope/pull/9",
+      "https://github.com/mihaellenic/opencode-tokscope/pull/10",
+      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239966134",
+      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239980624",
+      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240102996",
+      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240176037",
+      "d78ad67cce8454d6969cd04d718b555e62b8d53d",
+      "e2860aeff2f9885d901a3f07d307855c3963e139",
+      "948ee7a0c99ad2da900f6e6aabf65979377e9543",
+      "b66fb934393f277b46f8caf048e0e0db16f7656d",
+      "controlled-negative/identity-mismatch",
+      "failed before any checkout",
+      "every production step is `skipped`",
+      "`total_count: 0`",
+      "version 0.1.0 is already published",
+      "same already-published `0.1.0` registry guard",
+      "`--allow-published` was not used",
+      "outcome `stale`",
+      "PR state `open`",
+      "release-pr-evidence-10-1",
+      "12616692086",
+      "sha256:b0280956ef55884086f404cbcf898ce1edd068906965ba49a01eb6d424c857e4",
+      "The net diff from `54e341e` to `b66fb93` is empty",
+      "never authorized publication",
+      "no Release workflow run",
+      "were closed without merging",
+      "remains an open draft",
+      "No test injected a job-level `if` filter",
+      "controlled diagnostic tests, not a security guarantee",
+      "local ignored archives",
+      "https://github.com/mihaellenic/opencode-tokscope/issues/11",
+      "not fixed",
     ]) {
       expect(docs).toContain(line)
     }
