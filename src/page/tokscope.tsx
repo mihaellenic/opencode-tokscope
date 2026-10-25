@@ -91,11 +91,19 @@ export function TokscopePage(props: {
     return dailySeries(filtered().samples, key, rangeStartMs(filters().range, nowMs), nowMs)
   })
 
+  /** The row key the current day anchor belongs to; a change re-anchors, a publication does not. */
+  let anchoredKey: string | undefined
+
   createEffect(() => {
-    selectedKey()
+    const key = selectedKey()
     const points = series()
+    const current = selectedDay()
+    // Background publications must not steal the day: only a changed row or a day index that fell
+    // out of the (possibly shorter) series re-anchors; an unchanged row keeps its day.
+    if (key === anchoredKey && current < points.length) return
     const last = points.findLastIndex((point) => point.calls > 0)
     setSelectedDay(last === -1 ? Math.max(0, points.length - 1) : last)
+    anchoredKey = key
   })
 
   const moveDay = (delta: number) =>
