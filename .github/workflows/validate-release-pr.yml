@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          EVENT_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EVENT_HEAD_REPO: controlled-negative/identity-mismatch
           EVENT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
