@@ -159,16 +159,31 @@ jobs:
           outcome=unverified
           mkdir -p "$ARTIFACT_DIR"
           if pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR"); then
-            observed_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
-            pr_state=$(printf '%s' "$pr_json" | jq -r '.state // empty')
-            if [ "$pr_state" = "closed" ]; then
-              outcome=closed
-            elif [ -z "$observed_sha" ]; then
-              outcome=unverified
-            elif [ "$observed_sha" = "$expected_sha" ]; then
-              outcome=current
-            else
-              outcome=stale
+            if printf '%s' "$pr_json" | jq -e '
+              type == "object"
+              and (.head | type) == "object"
+              and (.head.sha | type) == "string"
+              and (.state | type) == "string"
+            ' >/dev/null 2>&1; then
+              observed_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha')
+              pr_state=$(printf '%s' "$pr_json" | jq -r '.state')
+              case "$observed_sha" in
+                ""|*[!0-9a-fA-F]*) ;;
+                *)
+                  if [ "${#observed_sha}" -eq 40 ]; then
+                    case "$pr_state" in
+                      closed) outcome=closed ;;
+                      open)
+                        if [ "$observed_sha" = "$expected_sha" ]; then
+                          outcome=current
+                        else
+                          outcome=stale
+                        fi
+                        ;;
+                    esac
+                  fi
+                  ;;
+              esac
             fi
           fi
           jq -n \

@@ -94,6 +94,7 @@ function freshnessEnv(overrides: Record<string, string | undefined> = {}) {
 
 type StepOptions = {
   pull?: unknown
+  pullRaw?: string
   env?: Record<string, string | undefined>
   ghFails?: boolean
   artifactFiles?: Record<string, string>
@@ -135,7 +136,7 @@ function runStep(stepName: string, options: StepOptions = {}): StepRun {
   chmodSync(gh, 0o755)
 
   const fixture = join(dir, "pull.json")
-  writeFileSync(fixture, JSON.stringify(options.pull ?? pullRequest(), null, 2))
+  writeFileSync(fixture, options.pullRaw ?? JSON.stringify(options.pull ?? pullRequest(), null, 2))
   const output = join(dir, "github-output")
   writeFileSync(output, "")
   const summary = join(dir, "github-summary")
@@ -295,6 +296,51 @@ describe("current PR head verification", () => {
       outcome: "unverified",
     })
   })
+
+  const unusableResponses: Array<{
+    name: string
+    raw: string
+    observed?: string | null
+    state?: string | null
+  }> = [
+    { name: "malformed JSON", raw: "{not-json" },
+    { name: "an empty response body", raw: "" },
+    { name: "a non-object response", raw: "[]" },
+    { name: "a null response", raw: "null" },
+    {
+      name: "a non-string live head SHA",
+      raw: JSON.stringify({ head: { sha: 42 }, state: "open" }),
+    },
+    {
+      name: "a non-string PR state",
+      raw: JSON.stringify({ head: { sha: headSha }, state: null }),
+    },
+    {
+      name: "a malformed live head SHA",
+      raw: JSON.stringify({ head: { sha: "not-a-sha" }, state: "open" }),
+      observed: "not-a-sha",
+      state: "open",
+    },
+    {
+      name: "an unknown PR state",
+      raw: JSON.stringify({ head: { sha: headSha }, state: "merged" }),
+      observed: headSha,
+      state: "merged",
+    },
+  ]
+
+  for (const fixture of unusableResponses) {
+    test(`fails closed with an unverified snapshot for ${fixture.name}`, () => {
+      const run = runStep(freshness, { pullRaw: fixture.raw, env: freshnessEnv() })
+      expect(run.exitCode).not.toBe(0)
+      expect(headStatus(run)).toEqual({
+        expected_sha: headSha,
+        observed_sha: fixture.observed ?? null,
+        pr_state: fixture.state ?? null,
+        outcome: "unverified",
+      })
+    })
+  }
 })
 
 const gateEnv = (overrides: Record<string, string | undefined> = {}) => ({
