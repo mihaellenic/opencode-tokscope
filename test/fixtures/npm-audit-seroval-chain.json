@@ -1,0 +1,132 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "@opencode/plugin": {
+      "name": "@opencode/plugin",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        "@opentui/solid"
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": [
+        "node_modules/@opencode/plugin"
+      ],
+      "fixAvailable": true
+    },
+    "@opentui/solid": {
+      "name": "@opentui/solid",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        "solid-js"
+      ],
+      "effects": [
+        "@opencode/plugin",
+        "opencode-tokscope"
+      ],
+      "range": "<=0.0.0-20261004-7dad729e || >=0.1.8",
+      "nodes": [
+        "node_modules/@opentui/solid"
+      ],
+      "fixAvailable": false
+    },
+    "opencode-tokscope": {
+      "name": "opencode-tokscope",
+      "severity": "critical",
+      "isDirect": true,
+      "via": [
+        "@opencode/plugin",
+        "@opentui/solid"
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": [
+        "node_modules/opencode-tokscope"
+      ],
+      "fixAvailable": false
+    },
+    "seroval": {
+      "name": "seroval",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1241207,
+          "name": "seroval",
+          "dependency": "seroval",
+          "title": "Seroval: `fromJSON()` Promise thenable assimilation invokes plugin-produced callables (bypass of GHSA-mv8w-475r-vwqw)",
+          "url": "https://github.com/advisories/GHSA-p6vx-979v-rg4c",
+          "severity": "critical",
+          "cwe": [
+            "CWE-843"
+          ],
+          "cvss": {
+            "score": 9.8,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+          },
+          "range": ">=0.12.0 <=1.6.0"
+        },
+        {
+          "source": 1241208,
+          "name": "seroval",
+          "dependency": "seroval",
+          "title": "Seroval: Memory exhaustion via unchecked TypedArray length in JSON deserialization",
+          "url": "https://github.com/advisories/GHSA-jp82-f5mq-hwhp",
+          "severity": "high",
+          "cwe": [
+            "CWE-770"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          "range": "<=1.6.2"
+        }
+      ],
+      "effects": [
+        "solid-js"
+      ],
+      "range": "<=1.6.2",
+      "nodes": [
+        "node_modules/seroval"
+      ],
+      "fixAvailable": false
+    },
+    "solid-js": {
+      "name": "solid-js",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        "seroval"
+      ],
+      "effects": [
+        "@opentui/solid"
+      ],
+      "range": "1.8.4 - 1.8.7 || 1.9.7 - 1.9.15 || 1.10.0-beta.0 - 2.0.0-rc.7",
+      "nodes": [
+        "node_modules/solid-js"
+      ],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 5,
+      "total": 5
+    },
+    "dependencies": {
+      "prod": 323,
+      "dev": 0,
+      "optional": 11,
+      "peer": 106,
+      "peerOptional": 0,
+      "total": 431
+    }
+  }
+}

@@ -3,6 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  SEROVAL_AUDIT_EXCEPTION,
+  auditExceptionDecision,
+  auditExceptionEvidence,
+  readConsumerVersions,
+  type AuditException,
+} from "../scripts/audit-exception"
+import {
   allowedArtifactFile,
   bannedArtifactContent,
   classifyPublishedLookup,
@@ -392,6 +399,231 @@ describe("summarizeAudit", () => {
         }),
       ),
     ).toThrow("malformed advisory")
+  })
+})
+
+type AuditReport = {
+  vulnerabilities: Record<string, { name?: string; severity?: string; via: unknown[] }>
+  metadata: { vulnerabilities: Record<string, number> }
+}
+
+const serovalChain = JSON.parse(
+  readFileSync(join(import.meta.dir, "fixtures", "npm-audit-seroval-chain.json"), "utf8"),
+) as AuditReport
+
+const APPROVED_ADVISORIES = [
+  "https://github.com/advisories/GHSA-p6vx-979v-rg4c",
+  "https://github.com/advisories/GHSA-jp82-f5mq-hwhp",
+]
+
+const pinnedVersions = new Map(Object.entries(SEROVAL_AUDIT_EXCEPTION.versions))
+
+const cloneChain = (): AuditReport => structuredClone(serovalChain)
+
+function decide(
+  report: unknown,
+  now: string,
+  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException } = {},
+) {
+  return auditExceptionDecision({
+    report,
+    versions: options.versions ?? pinnedVersions,
+    now: new Date(now),
+    exception: options.exception,
+  })
+}
+
+function blockedDetail(
+  report: unknown,
+  now = "2026-11-06T12:00:00Z",
+  options: { versions?: ReadonlyMap<string, string>; exception?: AuditException } = {},
+): string {
+  const decision = decide(report, now, options)
+  expect(decision.allowed).toBe(false)
+  return decision.allowed ? "" : decision.detail
+}
+
+describe("scoped audit exception", () => {
+  test("accepts the existing seroval advisory fixture before expiry", () => {
+    const decision = decide(serovalChain, "2026-11-06T23:59:59.999Z")
+    expect(decision.allowed).toBe(true)
+    if (!decision.allowed) throw new Error(decision.detail)
+    expect(decision.applied).toBe(true)
+    expect([...decision.advisories].sort()).toEqual([...APPROVED_ADVISORIES].sort())
+    expect([...decision.blockingEntries].sort()).toEqual(
+      ["@opencode/plugin", "@opentui/solid", "opencode-tokscope", "seroval", "solid-js"].sort(),
+    )
+  })
+
+  test("allows a clean report even after the exception expires", () => {
+    const decision = decide(JSON.parse(zeroAudit), "2027-01-01T00:00:00Z")
+    expect(decision.allowed).toBe(true)
+    if (!decision.allowed) throw new Error(decision.detail)
+    expect(decision.applied).toBe(false)
+    expect(decision.advisories).toEqual([])
+  })
+
+  test("expires exclusively at 2026-11-07T00:00:00Z", () => {
+    expect(blockedDetail(serovalChain, "2026-11-07T00:00:00.000Z")).toContain("expired")
+    expect(blockedDetail(serovalChain, "2026-11-07T00:00:01.000Z")).toContain("expired")
+  })
+
+  test("fails closed on an invalid exception even when the advisories match", () => {
+    const invalid = { ...SEROVAL_AUDIT_EXCEPTION, expiresAt: "not-a-timestamp" }
+    expect(blockedDetail(serovalChain, undefined, { exception: invalid })).toContain("invalid")
+  })
+
+  test("rejects a new advisory even when approved advisories remain on seroval", () => {
+    const report = cloneChain()
+    report.vulnerabilities.seroval?.via.push({
+      name: "seroval",
+      severity: "critical",
+      url: "https://github.com/advisories/GHSA-new-new-new",
+    })
+    expect(blockedDetail(report)).toContain("not approved")
+  })
+
+  test("rejects a new advisory on a propagated package", () => {
+    const report = cloneChain()
+    report.vulnerabilities["solid-js"]?.via.push({
+      name: "solid-js",
+      severity: "high",
+      url: "https://github.com/advisories/GHSA-new-solid",
+    })
+    expect(blockedDetail(report)).toContain("not approved")
+  })
+
+  test("rejects an approved advisory URL on an unrelated package", () => {
+    const report = cloneChain()
+    report.vulnerabilities["left-pad"] = {
+      name: "left-pad",
+      severity: "critical",
+      via: [{ name: "seroval", severity: "critical", url: APPROVED_ADVISORIES[0] }],
+    }
+    expect(blockedDetail(report)).toContain("not on the assessed chain")
+  })
+
+  test("rejects an unknown edge from an otherwise approved package", () => {
+    const report = cloneChain()
+    report.vulnerabilities["opencode-tokscope"]?.via.push("left-pad")
+    report.vulnerabilities["left-pad"] = {
+      name: "left-pad",
+      severity: "critical",
+      via: [{ name: "seroval", severity: "critical", url: APPROVED_ADVISORIES[0] }],
+    }
+    expect(blockedDetail(report)).toContain("not on the assessed chain")
+  })
+
+  test("rejects a via cycle", () => {
+    const report = cloneChain()
+    const seroval = report.vulnerabilities.seroval
+    if (!seroval) throw new Error("fixture has no seroval entry")
+    seroval.via = ["solid-js"]
+    expect(blockedDetail(report)).toContain("cycle")
+  })
+
+  test("rejects an unresolved via reference", () => {
+    const report = cloneChain()
+    delete report.vulnerabilities["solid-js"]
+    expect(blockedDetail(report)).toContain("unresolved")
+  })
+
+  test("rejects version drift for every known node", () => {
+    const serovalDrift = new Map(pinnedVersions)
+    serovalDrift.set("seroval", "1.5.7")
+    expect(blockedDetail(serovalChain, undefined, { versions: serovalDrift })).toContain("pinned 1.5.6")
+
+    const solidDrift = new Map(pinnedVersions)
+    solidDrift.set("solid-js", "1.9.15")
+    expect(blockedDetail(serovalChain, undefined, { versions: solidDrift })).toContain("pinned 1.9.12")
+  })
+
+  test("rejects an advisory name mismatch", () => {
+    const report = cloneChain()
+    report.vulnerabilities.seroval?.via.splice(0, 2, {
+      name: "not-seroval",
+      severity: "critical",
+      url: APPROVED_ADVISORIES[0],
+    })
+    expect(blockedDetail(report)).toContain("advisory name")
+  })
+
+  test("rejects malformed or missing report data", () => {
+    expect(blockedDetail(null)).toContain("not an object")
+    expect(blockedDetail({ vulnerabilities: {} })).toContain("metadata.vulnerabilities")
+
+    const missingUrl = cloneChain()
+    missingUrl.vulnerabilities.seroval?.via.splice(0, 2, { name: "seroval", severity: "critical" })
+    expect(blockedDetail(missingUrl)).toContain("url")
+
+    const malformedVia = cloneChain()
+    malformedVia.vulnerabilities.seroval?.via.splice(0, 2, null)
+    expect(blockedDetail(malformedVia)).toContain("malformed advisory")
+
+    const unknownSeverity = cloneChain()
+    const seroval = unknownSeverity.vulnerabilities.seroval
+    if (!seroval) throw new Error("fixture has no seroval entry")
+    seroval.severity = "urgent"
+    expect(blockedDetail(unknownSeverity)).toContain("unknown severity")
+  })
+
+  test("writes separate evidence with expiry and a residual-risk warning", () => {
+    const now = new Date("2026-11-06T12:00:00Z")
+    const decision = auditExceptionDecision({ report: serovalChain, versions: pinnedVersions, now })
+    if (!decision.allowed) throw new Error(decision.detail)
+    const evidence = auditExceptionEvidence(decision, pinnedVersions, now)
+    const text = JSON.stringify(evidence)
+    expect(text).toContain(SEROVAL_AUDIT_EXCEPTION.expiresAt)
+    expect(text).toContain("NOT a clean audit")
+    expect(text).toContain(SEROVAL_AUDIT_EXCEPTION.ownerAuthorization)
+    expect((evidence.exception as { id?: string }).id).toBe(SEROVAL_AUDIT_EXCEPTION.id)
+  })
+})
+
+describe("readConsumerVersions", () => {
+  test("extracts the configured resolved versions from the consumer lockfile", () => {
+    const dir = mkdtempSync(join(tmpdir(), "release-consumer-lock-"))
+    try {
+      writeFileSync(
+        join(dir, "package-lock.json"),
+        JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            "": { name: "consumer" },
+            "node_modules/seroval": { version: "1.5.6" },
+            "node_modules/@opentui/solid": { version: "0.6.8" },
+          },
+        }),
+      )
+      expect(readConsumerVersions(dir, ["seroval", "@opentui/solid"])).toEqual(
+        new Map([
+          ["seroval", "1.5.6"],
+          ["@opentui/solid", "0.6.8"],
+        ]),
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("fails closed when a required package is missing or ambiguous", () => {
+    const dir = mkdtempSync(join(tmpdir(), "release-consumer-lock-bad-"))
+    try {
+      writeFileSync(
+        join(dir, "package-lock.json"),
+        JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            "node_modules/seroval": { version: "1.5.6" },
+            "node_modules/a/node_modules/seroval": { version: "1.5.5" },
+          },
+        }),
+      )
+      expect(() => readConsumerVersions(dir, ["solid-js"])).toThrow("no resolved version")
+      expect(() => readConsumerVersions(dir, ["seroval"])).toThrow("multiple resolved versions")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
