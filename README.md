@@ -38,9 +38,8 @@ The page opens with **all projects · last 30 days · all reasoning settings**. 
 | `t` | Choose last 7 / 30 / 90 days or all history |
 | `r` | Choose all / a recorded reasoning setting / unknown |
 | `Esc` | Return to the previous screen |
-| `Enter` | Retry after a read error |
 
-**Sidebar:** shows up to three fastest pairs across **all projects on the connected instance**, each requiring at least **three measured calls in the rolling 24-hour window**. Click anywhere in the widget to open the page. It refreshes after a model step completes and once a minute while visible. Read failures retain the last successful rows marked `(stale)`; no qualifying pairs shows `No models with 3+ calls in 24h.`
+**Sidebar:** shows up to three fastest pairs across **all projects on the connected instance**, each requiring at least **three measured calls in the rolling 24-hour window**. Click anywhere in the widget to open the page. It refreshes after a model step completes and once a minute while visible. Read failures retain the last successful rows; no qualifying pairs shows `No models with 3+ calls in 24h.`
 
 ## What tok/s means
 
