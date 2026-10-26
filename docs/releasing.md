@@ -61,7 +61,9 @@ Merging the release PR triggers [release.yml](../.github/workflows/release.yml):
 4. It publishes only the accepted tarball with `npm publish … --access public`,
    using OIDC trusted publishing.
 5. It verifies the registry version and `dist.integrity` against the accepted
-   metadata, with bounded retries for registry propagation.
+   metadata, retrying every five seconds for up to five minutes of propagation
+   waits (registry request time is additional). A version or integrity mismatch
+   fails immediately.
 
 A GitHub Release or green PR check does not prove npm publication succeeded.
 Confirm the publish job and registry-integrity verification both passed. The

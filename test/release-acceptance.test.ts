@@ -729,6 +729,34 @@ describe("published artifact verification", () => {
     expect(waits).toEqual([7, 7])
   })
 
+  test("allows five minutes of propagation waits by default and succeeds on the last lookup", async () => {
+    let elapsedMs = 0
+    const outcome = await verifyPublishedArtifact(
+      createArtifactMetadata(metadataInput),
+      () => elapsedMs < 300_000
+        ? { status: "error", code: "E404", detail: "not found yet" }
+        : { status: "published", version: "9.9.9", integrity: "sha512-abc" },
+      { wait: async (ms) => { elapsedMs += ms } },
+    )
+
+    expect(outcome.ok).toBe(true)
+    expect(elapsedMs).toBe(300_000)
+    expect(outcome.attempts).toBe(61)
+  })
+
+  test("stops after five minutes of propagation waits by default if the version stays unavailable", async () => {
+    let elapsedMs = 0
+    const outcome = await verifyPublishedArtifact(
+      createArtifactMetadata(metadataInput),
+      () => ({ status: "error", code: "E404", detail: "not found" }),
+      { wait: async (ms) => { elapsedMs += ms } },
+    )
+
+    expect(outcome.ok).toBe(false)
+    expect(elapsedMs).toBe(300_000)
+    expect(outcome.attempts).toBe(61)
+  })
+
   test("stops after the bounded attempt count", async () => {
     const metadata = createArtifactMetadata(metadataInput)
     const waits: number[] = []
