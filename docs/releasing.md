@@ -1,543 +1,195 @@
 # Releasing opencode-tokscope
 
-## Automated release flow (current)
+Releases are automated with Release Please and npm trusted publishing.
+**Merging the release PR into `main` approves publication of that version.**
+Do not merge it just to update the changelog.
 
-Release Please proposes each release as a `chore(main): release X.Y.Z` pull request containing the version bump, the generated `CHANGELOG.md`, and the manifest update. Merging that pull request into `main` **is** the owner's publish approval; for CI publishing it replaces the per-step approval gates 2–5 of the previous manual procedure. Review the release PR's version and changelog before merging, and merge it only when you intend that exact version to be published. Legal and metadata decisions are not automated: a license, copyright, or author change still needs a new owner decision.
+## Setup
 
-Release Please creates and updates the release PR with the repository `GITHUB_TOKEN`. The resulting `pull_request` runs are created in an **approval-required** state for `opened`, `synchronize`, and `reopened` events. That includes every update to an existing release PR, not only its first creation: each bot push creates a new approval-required run, and an older green run or artifact is not current. No PAT or GitHub App secret is needed. A maintainer opens the PR's **Approve workflows to run** banner and approves the run.
+- Enable **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**.
+- On npm, configure the package's **Trusted Publisher** for GitHub repository
+  `mihaellenic/opencode-tokscope` and workflow filename **`release.yml`**.
+  Publishing uses OIDC; do not add a stored npm token or `NODE_AUTH_TOKEN`.
+- For local development, run `bun install` and `bun run setup` to install the
+  Conventional Commit hook. CI also validates commit subjects.
 
-Before approving, review the PR's current diff — especially `.github/workflows/` — and the current base and merge result. A `pull_request` run executes the workflow definition from the PR merge revision, so approval is not a defense against PR-controlled definitions: a writer who can change the workflow can change its permissions, trigger filter, and steps. Approval is an operational gate that is only as good as that review, not a security boundary.
+Workflow tool versions are defined in [release.yml](../.github/workflows/release.yml)
+and [validate-release-pr.yml](../.github/workflows/validate-release-pr.yml).
+Use those versions when reproducing a failure locally.
 
-The read-only `.github/workflows/validate-release-pr.yml` job runs only for same-repository heads on `release-please--` branches. It checks the live PR through the GitHub API (open, base `main`, same head repository and release ref, event head equal to the live head, valid base SHA), checks out the exact `github.event.pull_request.head.sha` — the PR head, not the PR-event merge commit in `github.sha` — and runs the same typecheck, test, build, and commit-subject checks as CI. It then runs the full pre-merge release preflight: the same `scripts/release-acceptance.ts` acceptance with `--output-dir` against a clean `git archive` export, covering tarball inspection, the scratch production-consumer install, and the section 4.1 consumer advisory audit with the same high/critical refusal and checked-exception handling as the release. The job has only `contents: read` and `pull-requests: read` — no `checks: write`, `actions: write`, OIDC, npm credential, or secret — and the publisher neither downloads nor trusts its artifact.
+## 1. Prepare and review the release PR
 
-In the PR's checks, select **Validate release PR / release-pr-validation** for the exact head commit you intend to merge, confirm that head against the PR, and read the run's **Summary** tab and logs for the human-readable acceptance, audit, and head-freshness summary. Download the `release-pr-evidence-<PR>-<attempt>` artifact when you need the preserved tarball, `artifact.json`, the raw `npm-audit-omit-dev.json` (and its stderr file when present), the optional `accepted-audit-exceptions.json`, and `head-status.json`; the human-readable summary is not part of the artifact directory. Evidence is unsigned and diagnostic: it is produced by PR-controlled code, is not a publishing attestation, and is never read by the publisher. The freshness record's `current` outcome covers the head and PR state at that check only, not the current base or merge result. Review the current base/merge result and the current workflow diff yourself before approving or merging, because an advanced `main`, a retargeted PR, or a push after the final check can make an older green run misleading.
+On pushes to `main`, Release Please creates or updates a `chore(main): release X.Y.Z`
+PR with the package version, `CHANGELOG.md`, and `.release-please-manifest.json`.
+The version policy is in [release-please-config.json](../release-please-config.json):
+while below 1.0, `feat` and breaking changes bump the minor version; `fix` bumps
+the patch version. Preserve existing release tags and manifest history.
 
-PR cache scope follows the pull request, not the head: caches from a `pull_request` run are scoped per pull request, not per head (the scope is the merge ref), a later run of the same PR can restore an earlier head's cache, and PR runs can read default-branch caches. The boundary preserved here is that PR code cannot write the default-branch cache scope; it is not a blanket read-only or per-head cache guarantee.
+Before merging:
 
-A high or critical advisory without an explicit, unexpired, exactly matching exception makes `release-pr-validation` red before merge, and the evidence upload preserves the raw audit and any `accepted-audit-exceptions.json` whenever the audit was reached. The check remains deliberately an advisory check, not a required check: it only runs for release PRs, so making it globally required would block ordinary PRs. The repository currently protects `main` with the active ruleset `main protection` (ID `25836446`): it requires code-owner review and an extra approval for changes not attributed to a code owner, has a required approval count of 0 and no required status checks, applies CodeQL thresholds `high_or_higher` and `errors`, prevents branch deletion and non-fast-forward pushes, and includes code-quality warnings. The specialized check is not among those required status checks, so an absent, pending, expired, or red run does not mechanically block a merge; inspect it yourself and do not treat absence or pending state as success. Verify the live ruleset rather than assuming this document's snapshot is current. The repository setting **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** must be enabled for Release Please to open the PR.
+1. Review the proposed version, changelog, and full diff, especially workflow and
+   acceptance-script changes. License, copyright, and author changes need owner approval.
+2. Find **Validate release PR / release-pr-validation** for the PR's exact current
+   head. The validator runs for same-repository `release-please--` branches on
+   `opened`, `synchronize`, and `reopened` events. Bot-triggered runs may need
+   **Approve workflows to run**; review the diff before approving each updated run.
+   If no run appears, inspect the workflow events and Release Please logs; do not merge.
+3. Require a successful validation and inspect its **Summary** tab and logs for
+   acceptance, consumer audit, and head freshness. An absent, pending, stale, or
+   failed run is not success. This is not a required check enforced by the release
+   workflow; verify the live branch rules and enforce this review before merging.
+4. Recheck the current base and merge result. Freshness verifies the head and PR
+   state at that check only, not the current base or merge result. A changed head
+   needs new validation; a changed base needs renewed review and, where relevant,
+   updated validation.
 
-The merge triggers `.github/workflows/release.yml`. The publish job checks out the **exact release tag** created by Release Please (not floating `main`), sets up Node 24 and a pinned npm `11.16.0` before any npm operation, repeats the full acceptance with typecheck/tests/build and `scripts/release-acceptance.ts` with `--output-dir`, publishes only the tarball that acceptance preserved, and verifies that the registry version and `dist.integrity` match the accepted tarball metadata with a bounded retry for npm propagation. A green `release-pr-validation` preflight is not substituted for this postmerge run. This exact-tag acceptance is independent of the PR evidence, not of the code on the tag: the publisher runs the tag's own workflow and acceptance script, so review workflow and acceptance changes in the release PR before merging. Trusted publishing uses OIDC (`id-token: write`); no npm token, `NODE_AUTH_TOKEN`, `.npmrc`, or `registry-url` placeholder exists. The release-please job in the same run creates the tag and GitHub Release.
+The PR validator checks out the exact PR head and runs typecheck, tests, build,
+commit-subject checks, and artifact acceptance. It has read-only repository/PR
+permissions and no publishing credentials. Its evidence is unsigned and diagnostic,
+not a publishing attestation. Approval is not a security boundary: a PR can change
+its workflow definition, so review that code rather than trusting a green check alone.
 
-Trusted publisher setup is owner-run: npmjs.com → package `opencode-tokscope` → Settings → **Trusted Publisher**: provider GitHub, repository `mihaellenic/opencode-tokscope`, workflow filename **`release.yml`** (exact match). Do not add a stored npm token.
+## 2. Automated publication
 
-Artifact acceptance runs the section 4.1 advisory audit against the scratch production consumer, which has an npm lockfile, in both the PR preflight and the postmerge release. Each preserves `npm-audit-omit-dev.json` as evidence; the release workflow uploads its directory as a `release-evidence-<tag>` artifact whenever the acceptance step ran (its upload step uses `if: always()`), including when acceptance itself fails, and the PR preflight uploads its evidence to the validation run. **Every high or critical advisory blocks publication unless it is covered by the single checked exception below; in the PR preflight the same condition makes `release-pr-validation` red.** The 2026-10-24 seroval chain is covered only by an owner-authorized, expiry-bound, issue-linked exception in `scripts/audit-exception.ts`: the exact GHSA-p6vx-979v-rg4c and GHSA-jp82-f5mq-hwhp URLs, the current artifact manifest version for `opencode-tokscope`, the exact consumer-lockfile transitive versions (`@opencode/plugin@2.1.2`, `@opentui/solid@0.6.8`, `solid-js@1.9.12`, `seroval@1.5.6`), and the exact assessed chain, tracked by https://github.com/mihaellenic/opencode-tokscope/issues/2 and expiring at **2026-11-07T00:00:00Z (exclusive)**. When applied, it writes `accepted-audit-exceptions.json` beside the untouched raw audit. It is **not** a clean audit and does not waive any new advisory (including on the seroval entry itself), unknown package or path, version drift, cycle, unresolved `via` reference, or malformed report. Remove it or complete a fresh owner review before expiry.
+Merging the release PR triggers [release.yml](../.github/workflows/release.yml):
 
-Retry options:
+1. Release Please creates the release tag and GitHub Release.
+2. The publisher checks out the exact tag, not floating `main`, and verifies that
+   `vX.Y.Z` agrees with `package.json`.
+3. It runs typecheck, tests, build, and fresh artifact acceptance. It never downloads
+   or trusts the PR validator's artifact.
+4. It publishes only the accepted tarball with `npm publish … --access public`,
+   using OIDC trusted publishing.
+5. It verifies the registry version and `dist.integrity` against the accepted
+   metadata, with bounded retries for registry propagation.
 
-- **Actions → re-run failed jobs** on the same run retains that run's Release Please outputs (`release_created`, `tag_name`). Use it when the failure happened before publication; the same acceptance and publish steps run again.
-- If the original run cannot be retried, use **Actions → Release → Run workflow** with an existing release tag. Recovery requires a real, non-draft GitHub Release for that tag, validates the tag against `package.json` on the exact tag, and runs the same acceptance/publish pipeline. The input is passed to shell steps only through environment variables; arbitrary refs are never interpolated into commands. The duplicate-version guard stays strict, so recovery refuses to republish a version that is already on npm. If publication already succeeded, verify the registry integrity manually; do not bypass the guard. This recovery dispatch accepts only `release_tag`; it must never carry a PR number or head SHA, and it is not a validation path.
-- After a release is confirmed, owner-run smoke tests and postpublication acceptance remain section 5 and section 7 work.
+A GitHub Release or green PR check does not prove npm publication succeeded.
+Confirm the publish job and registry-integrity verification both passed. The
+publisher executes release code, so pre-merge review of that code remains essential.
 
-**Rolling out to the existing release PR.** Land this remediation on `main` with a releasable Conventional Commit such as `fix(ci): isolate release PR validation`; a non-releasable commit may not cause Release Please to update the open release PR. Then confirm that the bot updated the existing PR so its head contains the remediation, and that the bot `synchronize` event created an approval-required run. Do not infer that a validation run exists — check the PR's checks and workflow runs. If the bot does not update the PR, stop and inspect its release output before acting. With separate maintainer approval, a human may close and reopen the refreshed PR:
+### Artifact acceptance and security gates
 
-```bash
-gh pr close 1 --repo mihaellenic/opencode-tokscope
-gh pr reopen 1 --repo mihaellenic/opencode-tokscope
-```
+[scripts/release-acceptance.ts](../scripts/release-acceptance.ts) is shared by PR
+validation and publication. It:
 
-That produces a human `reopened` event, which normally runs immediately instead of waiting for bot approval. This fallback alone does not verify bot triggering; it only creates a run. Never revive the removed PR-code dispatch path. Resolve conflicts and obtain results for the current head before merging; deleted, closed, or superseded heads are not reusable evidence.
+- Exports the committed source with `git archive`, excluding untracked files and
+  local build output, then installs, tests, and typechecks the clean export.
+- Refuses an already-published version or an inconclusive registry lookup.
+- Packs once and checks the manifest, host-runtime externals, and package contents:
+  only `package.json`, `README.md`, `LICENSE`, `tui.js`, and `dist/tui.js` are allowed.
+- Installs the tarball in a scratch production consumer with lifecycle scripts
+  disabled, then audits that consumer's resolved dependencies, not the repository.
+- Preserves the accepted tarball and its hashes in `artifact.json`.
 
-Release Please keeps the package pre-1.0: with `bump-minor-pre-major`, `feat` and breaking changes bump the minor version and `fix` bumps the patch version while the version is below 1.0.
+High/critical advisories block acceptance unless covered by an explicit,
+owner-authorized, issue-linked, unexpired exception in
+[scripts/audit-exception.ts](../scripts/audit-exception.ts). Exceptions match exact
+advisories, dependency versions, and assessed paths; they are not blanket waivers.
+See that file and its linked issue for active exceptions and deadlines rather than
+copying temporary findings here. Audit errors and malformed reports fail closed.
+An applied exception is **not a clean audit**.
 
-The baseline is the published `opencode-tokscope@0.1.0` package and the existing `v0.1.0` tag (commit `e7a72f0`); `.release-please-manifest.json` starts at `0.1.0`. Release Please depends on this bootstrap state; do not delete, move, or reuse the tag, and do not reset the manifest.
+Do not bypass peer resolution with `--force` or `--legacy-peer-deps`, or suppress
+engine/deprecation warnings to get a green release. Triage security findings and
+deprecation notices; unresolved findings block release unless explicitly covered
+by a documented exception. An issue alone does not remove a blocker.
 
-The interactive smoke tests in section 5 and the postpublication named-resolution and `plugin add` checks in section 7 remain **owner-run verification after publication**. They are not prepublication gates in the automated flow, but a failure still stops distribution under the rule in section 7.
+### Evidence
 
-**Status (pre-fix evidence):** the hosted runs below describe the removed dispatched design, not the current `pull_request`-triggered validator; they remain historical records only. CI [run 40179092586](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40179092586) and release [run 40179092606](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40179092606) succeeded, and the dispatched `release-pr-validation` preflight [run 40179119951](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40179119951) succeeded on release PR #1 head `fe363f9bfdf9a9f256029cc18be88451f2434ba5`. Its summary recorded a raw consumer audit with five critical entries, the scoped exception applied, and **NOT a clean audit**, and uploaded artifact `release-pr-evidence-1-1`. OIDC npm publish has **not** been exercised: the merge-time publish, OIDC trusted-publishing configuration and permission, postmerge acceptance, and published-integrity verification remain unverified. The PR-native validator and its approval-required flow were subsequently observed in hosted run `40237780191`, and CodeQL analysis of the merged remediation revised `main` reported the pre-fix alerts fixed; see **Remote rollout and hosted PR-scoped validation** below. Publication is still unverified: a green preflight proves neither publication nor future dependency resolution, so do not describe those as hosted-runtime verified until a real publish run is recorded.
+Both workflows upload evidence when files exist, including after acceptance
+failure. The release upload runs whenever the acceptance step ran; an early
+failure may produce no artifact. Artifacts have a 14-day retention:
 
-### Remote rollout and hosted PR-scoped validation (2026-10-25)
+- PR: `release-pr-evidence-<PR>-<attempt>`.
+- Publish: `release-evidence-<tag>`.
 
-The remediation was pushed as `fix/release-pr-cache-isolation` and merged into `main` as merge commit `529a7598d7c589e264a3ef782f4030d3ddbb430e` (PR #6). Its commits are `f84d8e9` (`fix(ci): isolate release validation in pull request scope`), `a327799` (`fix(ci): keep unverified head snapshot on malformed responses`), `0a10bf2` (`refactor(ci): remove release PR dispatch and document approvals`), `955084a` (`docs: distinguish run summary from evidence artifact`), `023d69a` (`docs: record PR-scoped release validation evidence`), and `39cb266` (`docs: scope release evidence to current remediation`). Release Please then refreshed release PR #1: its current head `54e341e8cbc334d52efb5cf4a413dd2e25882484` (`chore(main): release 0.2.0`) contains that merge and proposes the as-yet-unpublished `0.2.0`.
+Depending on how far acceptance got, evidence contains the tarball, `artifact.json`,
+raw `npm-audit-omit-dev.json` and optional stderr, and optional
+`accepted-audit-exceptions.json`. PR validation also records `head-status.json`
+when the freshness step runs. The human-readable summary is in the workflow run,
+not the artifact directory. Identify evidence by run URL, attempt, and commit/tag,
+not artifact name alone. Preserve needed evidence with the release record before
+it expires; keep private session data out of shared records.
 
-Before any hosted run, the local record for this branch was `bun test` (248 pass, 0 fail, 776 expect calls, 16 files under the local Bun 1.1.3 used for the final-review verification), `bun run typecheck`, `bun run build`, and `git diff --check` from `998ca9c` to the branch head, all exit 0; the retained `controller-typecheck.log` and `controller-build.log` record exit 0 for the same two commands, and `controller-environment.log` records the controller's separately observed Bun 1.4.4. The controller separately observed Node 24.22.1 and npm 11.19.1 in its own shell; those are separately observed environment facts, not inputs to the Bun commands above and not the workflows' pins (`release.yml` sets up Node 24 and pins npm `11.16.0` for its own npm operations). That coverage was fixture-level and local: `test/release-pr-isolation.test.ts` and `test/release-acceptance.test.ts` exercise PR identity and head verification, stale/closed/unverified outcomes, the summary distinctions, `registry-guard`, artifact metadata and integrity, audit fail-closed behavior, the scoped exception, and published-artifact comparison against fixtures, while `test/workflows.test.ts` checks workflow structure and documentation text.
+## 3. Verify the published plugin
 
-A full artifact acceptance was also attempted once locally, on `955084a`, with the approved `SCRATCH_ROOT` and a fresh `--output-dir`. It exited 1 at `registry-guard` immediately after `preflight`, because `package.json` still named the already-published, immutable `opencode-tokscope@0.1.0`. The refusal was preserved and `--allow-published` was not used, so no tarball, `artifact.json`, or raw consumer audit was written. That is the duplicate-version guard working as designed, not an acceptance result, and it must never be recorded as one; that local branch itself had no hosted run or hosted artifact. The historical pre-fix `0.1.1` dispatched run above (`release-pr-evidence-1-1`) remains historical diagnostic evidence only: it is not current evidence, does not cover these commits, and was never a clean audit.
+These are owner-run checks after automated publication, not automated prepublish
+gates. Unit tests and artifact acceptance do not prove live TUI behavior or
+registry-name resolution.
 
-**Hosted validation of the release PR.** Run [40237780191](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237780191) (attempt 2) finished `success` for `event=pull_request` on PR #1. Its actor is `github-actions[bot]` and its triggering actor is `mihaellenic`. The owner reports approving this workflow run; the API confirms a bot actor with a human triggering actor, but it does not capture the original pending-approval screen, and a re-run can also show a human triggering actor, so this record does not independently prove where or when the approval was given; the run was created at 2026-10-25T21:55:52Z and its attempt started at 21:57:00Z. The job ran with `Contents: read`, `PullRequests: read`, and `Metadata: read` only — no write scope, no `id-token`/OIDC, no secret, and no npm credential. Every substantive step succeeded: PR identity through the GitHub API, `actions/checkout@v5`, checked-out-commit verification, base-commit availability, Node and Bun setup with the pinned npm `11.16.0`, `bun install --frozen-lockfile`, typecheck, tests, build, commit subjects, exact-artifact acceptance, current-head verification, evidence upload, the summary, and the fail-closed `Require accepted evidence` gate. The checkout step logged the exact `54e341e8cbc334d52efb5cf4a413dd2e25882484` ref and `HEAD is now at 54e341e`, and the identity and verification steps logged the same head SHA. The log does not print `GITHUB_REF`: that this run's ref was the PR merge ref `refs/pull/1/merge` is GitHub's documented `pull_request` semantics, consistent with the observed event, PR number, run, and head mapping, but it was not read as an environment value here and must not be quoted as an observed variable.
+Use a real OpenCode in tmux with scratch configuration and a standalone server.
+Never alter the daily OpenCode configuration or restart its background service.
+Follow the isolation and screen-capture requirements in [AGENTS.md](../AGENTS.md).
+The development launcher loads the checkout, so it alone cannot verify the
+published package: the checks below must load the registry package, not a local
+path or symlink.
 
-**Evidence artifact.** The run uploaded `release-pr-evidence-1-2` (artifact ID `12615642893`, archive digest `sha256:2fde7953ff6bfdb228c3935a5fe3a096a1e8c40463a8f7e8548de311e9b54981`, expiring 2026-11-08T21:57:43Z under the 14-day retention). The downloaded copy contains exactly `opencode-tokscope-0.2.0.tgz`, `artifact.json`, `npm-audit-omit-dev.json`, `accepted-audit-exceptions.json`, and `head-status.json`; it is kept in the ignored workspace path `.superpowers/sdd/2026-10-25-release-pr-cache-isolation/hosted/run-40237780191/` and is not committed to this repository. Only the hosted artifact expires, on 2026-11-08T21:57:43Z; the local copy persists until it is manually removed, so neither copy is durable shared evidence — cite this record together with the run URL. The downloaded tarball re-hashes to SHA-256 `436c62daa569d636c08482f73fd58ab3f5a19a7b5b9fbb396a5e35a28e183132`, SHA-1 `c93252a59a143b21004c36dd699e16018d0384f0`, and sha512 SRI `sha512-1cIpIGcvsF58cXeucktmbpTAv7lyvxRC2NZvy3J6Us7IULL4nQ8hF8Q1w34cyz9oBENIjKb6+yTqWFEbiy2eZw==`, exactly matching `artifact.json`, and it contains exactly the five allowlisted package files. Bind this evidence to run 40237780191 and head `54e341e`, not to the artifact name alone — names repeat across runs. `head-status.json` records expected and observed `54e341e`, PR state `open`, and outcome `current`; that covers the head and PR state at that check only, not the current base or merge result, and not a later push.
+- Test named configuration with both `opencode-tokscope@X.Y.Z` and unversioned
+  `opencode-tokscope` in separate scratch environments. Confirm the unversioned
+  install resolves to the new version.
+- Run `opencode plugin add opencode-tokscope` with scratch configuration. Confirm
+  it records the TUI plugin in the expected `cli.json`, preserves existing keys,
+  and loads successfully on the next standalone launch.
+- Confirm exactly one Tokscope command, `/tokscope` opening and Escape return,
+  sidebar rendering and click navigation, filters, and appropriate empty-history
+  and real-history states. Use an isolated standalone host for real-history checks,
+  not the daily session. Check cache restoration after relaunch.
+- Reject missing-module, duplicate-runtime, or `No renderer found` errors.
 
-**Audit outcome at that head: NOT a clean audit.** The preserved raw consumer audit reports `info=0 low=0 moderate=0 high=0 critical=5` (total 5) — the known seroval chain — and the scoped exception `seroval-ssr-unreachable-2026-11-07` was applied for root `opencode-tokscope@0.2.0` with `@opencode/plugin@2.1.2`, `@opentui/solid@0.6.8`, `solid-js@1.9.12`, and `seroval@1.5.6`, tracking issue https://github.com/mihaellenic/opencode-tokscope/issues/2 and expiring 2026-11-07T00:00:00Z. The log and summary say the exception was applied and that this is not a clean audit. No waiver, extension, or new exception was added, and the exception still refuses release at or after its expiry.
+Record the source tag/commit, package version, workflow run, tarball integrity,
+audit decision, exact OpenCode version, and screen captures for runtime checks
+in the release PR or linked issue—not as a running history in this guide.
 
-**CodeQL closure on `main`.** Default-setup run [40237738234](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237738234) succeeded on the merged remediation revision `529a759`, and the inspected repository alert records then showed alerts 1–7 were `fixed` at 2026-10-25T21:55:42Z against `refs/heads/main` (all `actions/cache-poisoning/poisonable-step`), with no other alerts returned. `fixed` means the analysis of the merged revision no longer reports the finding; it is not a dismissal.
+If installation or runtime verification fails, stop recommending/distributing
+that release, document the failure, and ship a corrected **new version** through
+full acceptance. Never overwrite a published version or move its tag.
 
-### Hosted negative-path rejection tests (2026-10-25)
+## Recovery
 
-Three disposable draft PRs exercised the real PR-triggered validator, its live GitHub API checks, and bounded observation of the resulting runs. They are controlled test branches, not actual release forks or malicious-fork proof: the owner created them from this repository's own commits, and no untrusted external contributor path was simulated. Two conditions were injected (a claimed head repository in #8 and a bounded coordination step in #10); #9 passed every prerequisite and then failed in the same already-published `0.1.0` registry guard that a duplicate release would hit. No test changed permissions, added a secret, bypassed acceptance, dispatched a publisher, or merged. No test injected a job-level `if` filter, so these runs did not exercise the validator's fork guard, and the observed rejections are only the API-versus-claimed-identity check, the registry guard, and the final freshness check.
+- **Failure before publication:** use **Actions → Release → Re-run failed jobs**
+  on the original run to retain its Release Please outputs and repeat acceptance.
+- **Original run cannot be retried:** use **Actions → Release → Run workflow**
+  with `release_tag` set to an existing `vX.Y.Z`. Recovery requires a non-draft
+  GitHub Release and matching tag/package version. It repeats acceptance and
+  publication; it is not a PR-validation path.
+- **Version already exists on npm:** do not retry publishing or bypass the
+  duplicate-version guard. Compare its registry integrity with the original
+  accepted `artifact.json`. If it matches, publication succeeded; investigate
+  the remaining failed step. If it differs, stop and investigate.
 
-- **Wrong identity — PR [#8](https://github.com/mihaellenic/opencode-tokscope/pull/8), commit `d78ad67cce8454d6969cd04d718b555e62b8d53d`.** The only source change replaced the validator's claimed head repository with the literal `controlled-negative/identity-mismatch`, while the real same-repository PR and live API response stayed genuine. Run [40239966134](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239966134) (attempt 1) completed `failure`: the identity pre-check failed before any checkout, so checkout and every production step is `skipped` — install, typecheck, tests, build, commit subjects, acceptance, and freshness. The always-run upload and summary steps succeeded, the final `Require accepted evidence` gate remained skipped, and the run produced `total_count: 0` artifacts. The job ran with read-only `Contents: read`, `PullRequests: read`, and `Metadata: read`. No workflow approval was needed: the run started immediately and its pending-deployments list was empty. The hosted log does not name the failing assertion (a bare `test` exits 1 without a message); replaying the unmodified step body against the live PR identified it precisely as the head-repository equality check, with the same-repository SHA, state, base, and `GITHUB_REPOSITORY` checks passing first.
-- **Failed acceptance — PR [#9](https://github.com/mihaellenic/opencode-tokscope/pull/9), commit `e2860aeff2f9885d901a3f07d307855c3963e139`.** A docs-only marker left every production script, manifest, dependency, and permission byte-identical. Run [40239980624](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239980624) passed identity, exact-head checkout, install, typecheck, tests, build, and commit subjects, then the real acceptance step failed at `registry-guard` with `version 0.1.0 is already published`. `--allow-published` was not used, so no duplicate version was accepted and no bypass exists in this path. Freshness and the final gate were `skipped`, the always-run upload and summary succeeded with no evidence files, the native job failed, and the run uploaded no artifact.
-- **Stale head — PR [#10](https://github.com/mihaellenic/opencode-tokscope/pull/10), branched from the exact release PR head `54e341e8cbc334d52efb5cf4a413dd2e25882484`.** Commit `948ee7a0c99ad2da900f6e6aabf65979377e9543` added one bounded read-only coordination step after acceptance; commit `b66fb934393f277b46f8caf048e0e0db16f7656d` removed only that step. The net diff from `54e341e` to `b66fb93` is empty, and permissions stayed read-only. Old run [40240102996](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240102996) (attempt 1) passed every prerequisite and real acceptance, the injected coordination step observed the live head move from `948ee7a` to `b66fb93`, and the unchanged freshness check then failed with outcome `stale`: the preserved `head-status.json` records expected `948ee7a0c99ad2da900f6e6aabf65979377e9543`, observed `b66fb934393f277b46f8caf048e0e0db16f7656d`, PR state `open`, and `outcome: stale`. Upload and summary succeeded, the final gate stayed `skipped`, and the native job failed. Its artifact `release-pr-evidence-10-1` (ID `12616692086`, archive digest `sha256:b0280956ef55884086f404cbcf898ce1edd068906965ba49a01eb6d424c857e4`, expiring 2026-11-08) was downloaded only for observation; its contents were not executed. The rerun [40240176037](https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240176037) on the moved head `b66fb93` succeeded with a `current` freshness record, but it never authorized publication, and this test PR triggered no Release workflow run.
+Release tags and published npm versions are immutable. Dry runs do not publish
+and never constitute publication approval.
 
-All three were created as drafts and none was merged: PRs #8 and #9 were closed without merging by the controller at those same commits, while #10 remains an open draft until the owner or controller closes it. No test PR was marked ready, tagged, or published. Supporting raw logs, jobs/artifact JSON, and downloaded artifacts are retained as local ignored archives under `.superpowers/sdd/2026-10-25-release-pr-cache-isolation/hosted/` and are not committed here; the hosted artifacts expire. These tests show that the existing rejection paths operate in the hosted environment under read-only permissions and that a red run cannot be mistaken for a successful validation. They are controlled diagnostic tests, not a security guarantee: they do not prove fork-author isolation, hostile workflow-edit resistance, job-filter behavior, or publisher execution, and the accepted `0.2.0` artifact from run 40237780191 remains **NOT a clean audit** under the scoped seroval exception. The separate Node 20 artifact-action deprecation tracked in https://github.com/mihaellenic/opencode-tokscope/issues/11 is not fixed by this evidence.
+## Manual fallback
 
-**Remaining gates.** The hosted positive validation, exact-artifact acceptance, the controlled hosted negative-path runs (plan step 6), and CodeQL closure (plan step 5) are done as recorded above. The maintainer's final review and approval of this evidence before merging release PR #1 is still pending; #10 also awaits closure, and any later head or base movement invalidates this snapshot and requires a fresh run. Tracking issue https://github.com/mihaellenic/opencode-tokscope/issues/5 was already closed by pre-existing state; an accurate partial-completion comment remains to be posted, and that closure does not by itself prove any gate. No publication, OIDC trusted-publishing smoke test, postmerge acceptance, postpublication named-resolution or `plugin add` check, or release PR merge is claimed here; the publisher has no alert-status gate, so the maintainer records and approves this evidence before merging the release PR.
-
-For a fresh clone, run `bun install` and `bun run setup` before making release changes. `bun run setup` registers the shared `githooks/commit-msg` Conventional Commit hook; CI runs the same subject script, so bypassing the local hook does not bypass CI.
-
-The manual procedure below is the fallback when CI publishing is unavailable. Never ask for or paste passwords, one-time codes, or npm tokens into chat; the automated flow needs no npm credentials from the owner. No public-source hosting permission is assumed, and the pipeline never pushes source code automatically.
-
-## Manual fallback procedure
-
-> **Dry runs do not publish.** `npm pack`, `npm pack --dry-run`, and `npm publish --dry-run` create or inspect local artifacts only. They are not evidence that a version exists on npm, and a successful dry run is not approval to publish.
-
-## Running the checks
-
-Run every command in this document in **one persistent Bash shell** started from the repository root. Do not paste snippets into separate shells: `SCRATCH`, `SOURCE`, and `INSTALLED` carry forward between sections.
-
-Set the environment's approved temporary root explicitly. Do not infer `TMPDIR` and do not fall back to `/tmp`:
+Use only when CI publication is unavailable and the owner explicitly approves
+manual publication. Work from the intended release commit with a clean tracked
+tree and the workflow's tool versions. Set `SCRATCH_ROOT` to an approved temporary
+directory and choose a fresh absolute evidence directory outside the checkout.
+Run in one Bash shell from the repository root:
 
 ```bash
 set -euo pipefail
-export SCRATCH_ROOT="${SCRATCH_ROOT:?Set SCRATCH_ROOT to the approved temporary directory}"
-test -d "$SCRATCH_ROOT"
+export SCRATCH_ROOT="${SCRATCH_ROOT:?Set an approved temporary directory}"
+ARTIFACT_DIR="$(mktemp -d "$SCRATCH_ROOT/tokscope-release-evidence.XXXXXX")"
+bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"
 ```
 
-## Version and tag consistency
-
-The manifest version, tarball name, registry version, and release tag must agree. For the first release they are `0.1.0`, `opencode-tokscope-0.1.0.tgz`, and `v0.1.0`.
-
-```bash
-node -p 'require("./package.json").version'   # must print 0.1.0
-```
-
-Use a new npm version for every later release. Never attempt to overwrite or republish `0.1.0`. Tags are created only after publication is approved and verified, on the source commit that produced the accepted artifact:
+Review the evidence and smoke-test the installed tarball in an isolated host
+before manual publication, including empty/real history and plugin discovery.
+The owner must approve the exact artifact hash. Authenticate interactively with
+the intended npm account and required 2FA; never paste credentials into chat.
+Then publish the preserved bytes without rebuilding:
 
 ```bash
-test "$(node -p 'require("./package.json").version')" = "0.1.0"
-RELEASE_COMMIT="$(git rev-parse HEAD)"   # confirm this is the accepted source commit
-git tag -a v0.1.0 "$RELEASE_COMMIT" -m "opencode-tokscope 0.1.0"
-```
-
-Do not move or reuse a release tag. Do not push the tag without a separate approval and a confirmed remote.
-
-## 1. Export a clean source tree
-
-Use a `git archive` export, not a worktree, so generated `dist/`, `node_modules/`, and untracked internal material cannot leak into acceptance. Run from the repository root with the intended release commit checked out and a clean tracked tree.
-
-```bash
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)"   # tracked work must be clean; git archive omits untracked files anyway
-
-SCRATCH="$(mktemp -d "$SCRATCH_ROOT/tokscope-release.XXXXXX")"
-SOURCE="$SCRATCH/source"
-mkdir -p "$SOURCE"
-
-git -C "$REPO_ROOT" archive --format=tar HEAD | tar -x -C "$SOURCE"
-cd "$SOURCE"
-
-test ! -e dist
-test -f LICENSE
-test -f README.md
-bun install --frozen-lockfile
-bun test
-bun run typecheck
-
-echo "SCRATCH=$SCRATCH"
-echo "SOURCE=$SOURCE"
-```
-
-Use the environment's approved temporary root. Keep `$SCRATCH` for the rest of the run; all later commands depend on it. The export must not contain `dist/` before the pack step. If a local checkout carries internal working documents, the npm allowlist excludes them from the artifact; this public repository deliberately avoids tracking them.
-
-## 2. Pack once for acceptance
-
-Pack from the exported tree. Only this artifact may be published; do not rebuild between acceptance and publication.
-
-```bash
-cd "$SOURCE"
-npm pack --json --pack-destination "$SCRATCH" | sed -n '/^\[/,$p' > "$SCRATCH/pack.json"
-
-node -e '
-const fs = require("node:fs")
-const [packed] = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-if (packed.filename !== "opencode-tokscope-0.1.0.tgz") {
-  throw new Error(`unexpected artifact: ${packed.filename}`)
-}
-console.log(JSON.stringify({ filename: packed.filename, integrity: packed.integrity, shasum: packed.shasum }, null, 2))
-' "$SCRATCH/pack.json"
-
-shasum -a 256 "$SCRATCH/opencode-tokscope-0.1.0.tgz" | tee "$SCRATCH/artifact.sha256"
-```
-
-Expect exactly one tarball and a successful `prepack` build from a missing `dist/`. The `built dist/tui.js` line belongs to `prepack` and appears before the JSON; the `sed` above isolates the JSON array. Record both the npm integrity and the SHA-256 hash.
-
-## 3. Inspect and extract the tarball
-
-```bash
-tar -tzf "$SCRATCH/opencode-tokscope-0.1.0.tgz" | tee "$SCRATCH/artifact-files.txt"
-
-UNEXPECTED="$(tar -tzf "$SCRATCH/opencode-tokscope-0.1.0.tgz" \
-  | grep -Ev '^package/(package\.json|README\.md|LICENSE|tui\.js|dist/tui\.js)$' || true)"
-test -z "$UNEXPECTED"   # any other path is a failure
-
-mkdir -p "$SCRATCH/unpacked"
-tar -xzf "$SCRATCH/opencode-tokscope-0.1.0.tgz" -C "$SCRATCH/unpacked"
-
-test -f "$SCRATCH/unpacked/package/dist/tui.js"
-test -f "$SCRATCH/unpacked/package/tui.js"
-
-node -e '
-const p = require(process.argv[1])
-if (p.name !== "opencode-tokscope" || p.version !== "0.1.0") throw new Error("wrong package identity")
-if (p.license !== "MIT") throw new Error("license is not MIT")
-if (p.publishConfig?.access !== "public") throw new Error("publish access is not public")
-if (p.exports?.["./tui"] !== "./dist/tui.js") throw new Error("TUI export target changed")
-for (const hook of ["preinstall", "install", "postinstall"]) {
-  if (p.scripts?.[hook]) throw new Error(`consumer lifecycle hook present: ${hook}`)
-}
-console.log("manifest checks passed")
-' "$SCRATCH/unpacked/package/package.json"
-
-node -e '
-const fs = require("node:fs")
-const code = fs.readFileSync(process.argv[1], "utf8")
-for (const specifier of ["@opencode/plugin/tui", "@opentui/core", "@opentui/solid", "solid-js"]) {
-  if (!code.includes(`from "${specifier}"`)) throw new Error(`host runtime is not external: ${specifier}`)
-}
-console.log("host runtime imports remain external")
-' "$SCRATCH/unpacked/package/dist/tui.js"
-
-if grep -RInE --binary-files=without-match 'task-[0-9]+-report|BEGIN [A-Z ]*PRIVATE KEY' "$SCRATCH/unpacked/package"; then
-  echo "internal or secret material found in artifact" >&2
-  exit 1
-fi
-
-if grep -RInF --binary-files=without-match "$SOURCE" "$SCRATCH/unpacked/package"; then
-  echo "absolute source path found in artifact" >&2
-  exit 1
-fi
-```
-
-Accept only `package/package.json`, `package/README.md`, `package/LICENSE`, `package/tui.js`, and `package/dist/tui.js`. Reject missing export targets, internal reports or plans, credentials, source maps pointing at the checkout, absolute checkout paths, and any undeclared runtime import. If a test or inspection fails, stop: do not publish a rebuilt or partially accepted artifact.
-
-## 4. Install the artifact as a consumer
-
-Install outside the repository, omitting development dependencies and lifecycle scripts. The plugin is prebuilt; the consumer must not need Bun or a build step.
-
-```bash
-mkdir -p "$SCRATCH/consumer"
-npm install \
-  --prefix "$SCRATCH/consumer" \
-  --omit=dev \
-  --ignore-scripts \
-  --no-audit \
-  --no-fund \
-  "$SCRATCH/opencode-tokscope-0.1.0.tgz"
-
-INSTALLED="$SCRATCH/consumer/node_modules/opencode-tokscope"
-test -f "$INSTALLED/dist/tui.js"
-test -f "$INSTALLED/tui.js"
-node -p 'require(process.argv[1]).version' "$INSTALLED/package.json"
-npm explain --prefix "$SCRATCH/consumer" opencode-tokscope
-```
-
-Record whether dependency resolution succeeded and confirm no install script ran. The smoke-test target is `$INSTALLED`, not this checkout and not an `npm link`. If npm reports missing peers or a failed dependency, stop and investigate rather than adding local paths.
-
-Peer resolution is part of acceptance. If npm reports `ERESOLVE`, do not add `--legacy-peer-deps` or `--force` to make the check pass; that hides a broken consumer install. Correct the peer contract in a separate owner-approved packaging change, rebuild, and re-run artifact acceptance.
-
-### 4.1 Dependency and advisory acceptance
-
-Run the advisory audit against the scratch production consumer, never the repository. Do not add a repository `package-lock.json`, upgrade npm/Bun, or change peers/engines to get a green result. The installed Bun 1.1.3 has no native audit subcommand, so use npm from the consumer.
-
-A nonzero audit exit is expected when advisories exist. Handle it explicitly so `set -e` does not hide it and the result is not mistaken for success:
-
-```bash
-cd "$SCRATCH/consumer"
-set +e
-npm audit --omit=dev --json > "$SCRATCH/npm-audit-omit-dev.json" 2> "$SCRATCH/npm-audit-omit-dev.stderr.txt"
-AUDIT_EXIT=$?
-set -e
-
-printf 'npm audit exit: %s\n' "$AUDIT_EXIT"
-if [ "$AUDIT_EXIT" -eq 0 ]; then
-  echo "npm audit reported no known vulnerabilities"
-else
-  echo "npm audit exit $AUDIT_EXIT: capture and triage this result before release" >&2
-fi
-
-node -e '
-const fs = require("node:fs")
-const audit = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-console.log("severity buckets:", JSON.stringify(audit.metadata?.vulnerabilities ?? {}))
-for (const [name, entry] of Object.entries(audit.vulnerabilities ?? {})) {
-  const via = (entry.via ?? []).map((item) => typeof item === "string" ? item : item.title).join("; ")
-  console.log(`${entry.severity}: ${name} via ${via}`)
-}
-' "$SCRATCH/npm-audit-omit-dev.json"
-```
-
-The 2026-10-24 baseline audit exited 1 with five critical entries in npm's per-package buckets. They are one transitive chain, not five unrelated vulnerabilities: `opencode-tokscope@0.1.0 → @opencode/plugin@2.1.2 → @opentui/solid@0.6.8 → solid-js@1.9.12 → seroval@1.5.6`. The underlying advisories are GHSA-p6vx-979v-rg4c (critical, `fromJSON` thenable assimilation) and GHSA-jp82-f5mq-hwhp (high, unchecked TypedArray length). npm may aggregate or dedupe the same root cause differently between runs; record the actual buckets and chain, not the count alone. `@opentui/solid` currently peer-pins solid-js exactly `1.9.12`, so the patched seroval path requires an upstream OpenTUI change; there is no local manifest fix that clears the tree without overriding peers or engine checks.
-
-A scoped reachability assessment found no affected SSR/`fromJSON` deserialization path in the supported host-bound plugin: `seroval` is imported only by Solid's SSR server entry, the shipped `dist/tui.js` imports only the four host externals, and neither the plugin dist nor the `@opentui/solid`, `@opentui/core`, and `@opencode/plugin` dist trees load `solid-js/web`, `seroval`, or `fromJSON` for untrusted data. This is a scoped assessment, **not** a clean audit and not a blanket safety promise. Standalone use of the npm-installed dependency tree is unsupported and may still surface these advisories.
-
-Re-run the consumer audit and re-evaluate reachability **before publication and no later than 2026-11-07, whichever comes first**. Any reachable or untriaged high/critical finding blocks release. An existing unreachable finding may be accepted only with its scope, rationale, and review date recorded in the release evidence and, for automation, an owner-authorized checked exception with a fixed expiry; it must never be hidden or described as a clean audit.
-
-Automated acceptance runs this audit itself against the scratch production consumer and fails closed on malformed output, network/auth errors, cycles, unresolved `via` references, unknown packages or paths, and **every** high/critical entry. The only automated allowance is the checked exception in `scripts/audit-exception.ts`. It is not package-level or severity-wide: it accepts only the two exact advisory URLs, the exact advisory names and severities, the current artifact manifest version for the root package, the exact resolved transitive versions read from the consumer `package-lock.json` at acceptance time, and the exact assessed `opencode-tokscope → @opencode/plugin / @opentui/solid → solid-js → seroval` edges. Any new advisory on the same seroval entry, any additional package or edge, any dependency version drift, a mismatch between the installed and manifest root versions, a cycle, an unresolved reference, or malformed data refuses release. An ordinary release-please root version bump therefore does not revise the exception; the vulnerable and transitive component pins stay exact. The exception is explicitly linked to https://github.com/mihaellenic/opencode-tokscope/issues/2; an empty or different tracker URL is invalid. It expires at `2026-11-07T00:00:00Z`; acceptance at or after that instant refuses release even when the advisories still match, and an invalid or missing exception configuration also refuses release. A report with no high/critical entries passes without consulting the exception.
-
-When applied, acceptance preserves the raw `npm-audit-omit-dev.json` unchanged and writes a separate `accepted-audit-exceptions.json` containing the exception id, exact advisories, blocking entries, resolved versions, owner authorization, rationale, expiry, and an explicit residual-risk warning. Console output and the acceptance summary must say that the scoped exception was applied and must **not** claim a clean audit.
-
-EBADENGINE and deprecation warnings are separate from advisories and are not audit findings. For example, peer auto-resolution may install `@opentui/core@0.6.8`, whose engine metadata targets Node `>=26.4.0` and Bun `>=1.3.14`, while the external npm process used for packing may be older. The supported runtime is OpenCode's bundled host, not that external Node process. Record the warnings; do not override engine checks to silence them.
-
-## 5. Smoke-test the installed artifact in OpenCode V2
-
-These are interactive checks. Launch the TUI from the persistent release shell (or an equivalent session with the same exported variables). Do not overwrite, relocate, or disable the owner's `~/.config/opencode/cli.json`, plugin symlink, or running service.
-
-Record the exact host before testing:
-
-```bash
-opencode --version
-```
-
-### 5.1 Empty history: isolated private server
-
-Use scratch config, data, state, cache, database, and working directories so the owner's configuration and auto-discovered plugins cannot load. The explicit installed-package path is still supplied through the inline CLI override.
-
-```bash
-SMOKE_EMPTY="$SCRATCH/smoke-empty"
-mkdir -p \
-  "$SMOKE_EMPTY/config/opencode" \
-  "$SMOKE_EMPTY/data" \
-  "$SMOKE_EMPTY/state" \
-  "$SMOKE_EMPTY/cache" \
-  "$SMOKE_EMPTY/db" \
-  "$SMOKE_EMPTY/work"
-
-export XDG_CONFIG_HOME="$SMOKE_EMPTY/config"
-export XDG_DATA_HOME="$SMOKE_EMPTY/data"
-export XDG_STATE_HOME="$SMOKE_EMPTY/state"
-export XDG_CACHE_HOME="$SMOKE_EMPTY/cache"
-export OPENCODE_DB="$SMOKE_EMPTY/db/empty.db"
-export OPENCODE_CLI_CONFIG_CONTENT="$(node -e '
-console.log(JSON.stringify({ plugins: [process.argv[1]] }))
-' "$INSTALLED")"
-
-cd "$SMOKE_EMPTY/work"
-opencode --standalone
-```
-
-Confirm all of the following in that isolated process:
-
-- Exactly one Tokscope command appears.
-- `/tokscope` opens the page, and `esc` returns.
-- The session sidebar renders and clicking it opens the page.
-- Empty history shows the intended empty state, not a crash or fake zeroes.
-- There is no duplicate Tokscope copy, missing-module error, duplicate-runtime symptom, or `No renderer found` failure.
-
-Quit the TUI before continuing.
-
-### 5.2 Available real history: shared service
-
-This check reads the running shared service's history without changing it. Keep the CLI config isolated in scratch space so the owner's plugin symlink/config is not auto-discovered, but use the default data and state locations so the client connects to the existing shared service instead of starting another one. Do not stop, restart, or reconfigure that service.
-
-```bash
-SMOKE_SHARED="$SCRATCH/smoke-shared"
-mkdir -p "$SMOKE_SHARED/config/opencode" "$SMOKE_SHARED/work"
-
-export XDG_CONFIG_HOME="$SMOKE_SHARED/config"
-unset XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME OPENCODE_DB OPENCODE_CLI_CONFIG_CONTENT
-export OPENCODE_CLI_CONFIG_CONTENT="$(node -e '
-console.log(JSON.stringify({ plugins: [process.argv[1]] }))
-' "$INSTALLED")"
-
-cd "$SMOKE_SHARED/work"
-opencode
-```
-
-Repeat the command/page/sidebar checks and confirm that available real history displays. If the shared service or suitable real history is unavailable, this required check is unverified and publication is blocked.
-
-Quit the TUI before continuing.
-
-### 5.3 Genuine auto-discovery through a scratch plugin directory
-
-This check does not use the configured `plugins` array or inline override. It discovers the package through a scratch `plugins` directory and the root `tui.js` re-export. The export already has `dist/` from the pack step.
-
-```bash
-SMOKE_DISCOVERY="$SCRATCH/smoke-discovery"
-mkdir -p \
-  "$SMOKE_DISCOVERY/config/opencode/plugins" \
-  "$SMOKE_DISCOVERY/data" \
-  "$SMOKE_DISCOVERY/state" \
-  "$SMOKE_DISCOVERY/cache" \
-  "$SMOKE_DISCOVERY/db" \
-  "$SMOKE_DISCOVERY/work"
-
-export XDG_CONFIG_HOME="$SMOKE_DISCOVERY/config"
-export XDG_DATA_HOME="$SMOKE_DISCOVERY/data"
-export XDG_STATE_HOME="$SMOKE_DISCOVERY/state"
-export XDG_CACHE_HOME="$SMOKE_DISCOVERY/cache"
-export OPENCODE_DB="$SMOKE_DISCOVERY/db/empty.db"
-unset OPENCODE_CLI_CONFIG_CONTENT
-
-ln -sfn "$SOURCE" "$SMOKE_DISCOVERY/config/opencode/plugins/opencode-tokscope"
-cd "$SMOKE_DISCOVERY/work"
-opencode --standalone
-```
-
-Confirm `/tokscope` opens through the root `tui.js` re-export and that only one Tokscope copy is loaded. To exercise auto-discovery of the **installed artifact** rather than the source export, link `$INSTALLED` instead and repeat.
-
-### 5.4 Residual risk: prepublication checks cannot prove named npm resolution or `plugin add` acceptance
-
-Every prepublication check above supplies an explicit path: either `OPENCODE_CLI_CONFIG_CONTENT` or a scratch plugin directory. Those checks prove the artifact, runtime, and isolation behavior, but they do **not** exercise resolving the package by its not-yet-published registry name, and they do **not** exercise the `opencode plugin add` install path. The official V2 CLI supports named TUI-only packages, and its `plugin add` command classifies a TUI-only package and records it in `cli.json`; prepublication path checks still cannot prove that either behavior works with the published artifact.
-
-Do not infer publication approval from these checks, and do not stand up or publish to a local registry to simulate the public name. Named resolution and `plugin add` acceptance must both be tested immediately after publication as described in section 7.
-
-Compatibility claims are limited to recorded evidence. OpenCode **2.1.2** is the development API baseline and the historically tested host; the installed host may be a newer 2.x release such as 2.1.4. Record the exact version used for acceptance, but do not add a new README compatibility claim until that run is recorded. If the host cannot be isolated safely, stop; do not publish until the required checks have actually passed.
-
-## 6. Publication prerequisites
-
-All of these must be true before the publish command is even considered:
-
-- The owner has approved the exact artifact hash and this public release.
-- `package.json` still says `opencode-tokscope@0.1.0`; no rebuild has changed the accepted bytes.
-- The version is unpublished and the package name is available to the intended account.
-- The owner has authenticated interactively with publishing 2FA.
-- The publication target is public and unscoped, with `publishConfig.access = "public"`.
-- The artifact review above passed, and all required prepublication runtime checks passed: path-isolated empty history, real history, and genuine auto-discovery. Pending or failed checks block publication; there is no pending-check bypass.
-- The consumer-scoped advisory audit was re-run before publication or by 2026-11-07, whichever comes first, and reachability was re-evaluated. Any reachable or untriaged high/critical finding blocks release; an unreachable finding is accepted only with recorded scope, rationale, and review date and, for automation, the unexpired checked seroval exception with exactly matching advisory URLs, current artifact root version, pinned transitive versions, and assessed paths.
-- The residual risk is understood: prepublication path checks cannot prove named npm resolution. Postpublication named-resolution and `plugin add` acceptance in section 7 are mandatory, and failure stops distribution.
-- No public source URL is required. Do not invent one; add repository/homepage metadata only if hosting is separately approved.
-
-```bash
-npm login   # owner-only, interactive, with publishing 2FA
+npm login
 npm whoami
-
-if npm view opencode-tokscope@0.1.0 version >/dev/null 2>&1; then
-  echo "opencode-tokscope@0.1.0 is already published; stop and agree on a new version" >&2
-  exit 1
-fi
+TARBALL="$(node -p 'require(process.argv[1]).path' "$ARTIFACT_DIR/artifact.json")"
+npm publish "$TARBALL" --access public
+bun scripts/release-acceptance.ts --verify-published "$ARTIFACT_DIR/artifact.json"
 ```
 
-Do not proceed if `npm whoami` shows an unexpected account or the version check finds an existing `0.1.0`.
-
-## 7. Publish the accepted tarball
-
-Only after the owner explicitly approves publication of the exact artifact:
-
-```bash
-npm publish "$SCRATCH/opencode-tokscope-0.1.0.tgz" --access public
-```
-
-Publish the accepted tarball itself. Do not run `npm publish` from the checkout, because that can produce different bytes. Then compare the registry integrity with the accepted pack metadata:
-
-```bash
-npm view opencode-tokscope@0.1.0 version dist.integrity
-```
-
-The reported version must be `0.1.0` and `dist.integrity` must equal the integrity recorded in `$SCRATCH/pack.json`.
-
-### Mandatory postpublication named-resolution acceptance
-
-Prepublication checks used explicit paths and therefore cannot prove that the published name resolves. Immediately after publication, test **both** the versioned and unversioned named configuration in isolated scratch environments. No local path or symlink may satisfy these runs.
-
-```bash
-postpub_check() {
-  local label="$1"
-  local plugin="$2"
-  local dir="$SCRATCH/postpub-$label"
-
-  mkdir -p \
-    "$dir/config/opencode" \
-    "$dir/data" \
-    "$dir/state" \
-    "$dir/cache" \
-    "$dir/db" \
-    "$dir/work"
-
-  node -e '
-const fs = require("node:fs")
-const dir = process.argv[1]
-const plugin = process.argv[2]
-fs.writeFileSync(`${dir}/cli.json`, JSON.stringify({ plugins: [plugin] }, null, 2) + "\n")
-' "$dir/config/opencode" "$plugin"
-
-  export XDG_CONFIG_HOME="$dir/config"
-  export XDG_DATA_HOME="$dir/data"
-  export XDG_STATE_HOME="$dir/state"
-  export XDG_CACHE_HOME="$dir/cache"
-  export OPENCODE_DB="$dir/db/empty.db"
-  unset OPENCODE_CLI_CONFIG_CONTENT
-
-  ( cd "$dir/work" && opencode --standalone )
-}
-
-postpub_check pinned "opencode-tokscope@0.1.0"
-postpub_check latest "opencode-tokscope"
-```
-
-For each run, confirm exactly one Tokscope command, `/tokscope` navigation and Escape return, sidebar rendering and click navigation, the empty-history state, and no missing-module, duplicate-runtime, or `No renderer found` failure. The unversioned run must resolve to the newly published version and must not be satisfied by a local package, path, or symlink. The pre-existing-`cli.json` state check below belongs to the `plugin add` acceptance only: `postpub_check` writes its fixture file directly and is not an exercise in preserving existing keys.
-
-### `plugin add` acceptance
-
-This check exercises the documented one-command install path end to end: the CLI resolves the published package by name, installs it, classifies it as a TUI plugin, and records it in `cli.json`. Like the named-resolution runs, it must be satisfied only by the published registry package, never by a local path or symlink, and it runs with scratch-isolated configuration so the owner's own `cli.json` is untouched.
-
-```bash
-plugin_add_check() {
-  local dir="$SCRATCH/plugin-add"
-
-  mkdir -p \
-    "$dir/config/opencode" \
-    "$dir/data" \
-    "$dir/state" \
-    "$dir/cache" \
-    "$dir/db" \
-    "$dir/work"
-
-  printf '{\n  "$schema": "https://opencode.ai/v2/cli.json",\n  "other": true\n}\n' > "$dir/config/opencode/cli.json"
-
-  export XDG_CONFIG_HOME="$dir/config"
-  export XDG_DATA_HOME="$dir/data"
-  export XDG_STATE_HOME="$dir/state"
-  export XDG_CACHE_HOME="$dir/cache"
-  export OPENCODE_DB="$dir/db/plugin-add.db"
-  unset OPENCODE_CLI_CONFIG_CONTENT
-
-  ( cd "$dir/work" && opencode plugin add opencode-tokscope )
-
-  node -e '
-const cfg = require(process.argv[1] + "/config/opencode/cli.json")
-if (cfg.other !== true) throw new Error("pre-existing `other` key did not survive: " + JSON.stringify(cfg))
-if (!Array.isArray(cfg.plugins) || !cfg.plugins.includes("opencode-tokscope")) {
-  throw new Error("plugin entry missing or malformed: " + JSON.stringify(cfg))
-}
-console.log("plugin add cli.json acceptance passed (parse-based)")
-' "$dir"
-
-  ( cd "$dir/work" && opencode --standalone )
-}
-
-plugin_add_check
-```
-
-Confirm all of the following: the `opencode plugin add` command announces success against a `cli.json` path under `$XDG_CONFIG_HOME`; the file now contains `opencode-tokscope` and still contains the pre-existing `"other": true` key; the follow-up scratch TUI launch shows exactly one Tokscope command and page with no missing-module, duplicate-runtime, or `No renderer found` failure. If `plugin add` writes to a different file, fails, or corrupts existing keys, that is an acceptance failure: record the exact output and follow the stop-distribution rule below.
-
-If either named configuration or the `plugin add` acceptance fails, `0.1.0` is immutable: stop distribution immediately, do not unpublish or overwrite `0.1.0`, fix the package/name/resolution contract, and repeat full acceptance under a new version such as `0.1.1`.
-
-## 8. Record release evidence
-
-Report to the owner, without checking private session data into the repository:
-
-- source commit and package version;
-- exact `opencode --version` used for the smoke test;
-- `bun test` and `bun run typecheck` results from the clean export;
-- tarball filename, file list, SHA-256, and npm integrity; the accepted `artifact.json` (path/version/integrity) and the `release-evidence-<tag>` workflow artifact;
-- consumer install result;
-- consumer-scoped `npm audit` exit code and raw JSON, severity buckets, advisory chain, reachability decision, scope/rationale, and review date; when the checked exception applies, also the separate `accepted-audit-exceptions.json` with its id, tracking issue URL, exact advisories, pinned versions, expiry, owner authorization, and residual-risk warning. Record EBADENGINE/deprecation warnings separately from advisories;
-- each prepublication smoke-test outcome: isolated empty history, real history, and genuine auto-discovery. Pending or failed checks block publication; they are not accepted as pending;
-- postpublication named-resolution results for both `opencode-tokscope@0.1.0` and `opencode-tokscope`, and the `plugin add` acceptance result, including any stop-distribution decision;
-- publication result and registry integrity comparison, if publication was approved.
-
-## npm files review versus public source hosting
-
-Reviewing the npm tarball is not a review of the repository. The tarball contains only the allowlisted runtime files plus README, LICENSE, and `package.json`. Public source hosting (or any repository whose history contains local-only internal plans, reports, or private data) exposes the full working tree, Git history, author metadata, and anything ever committed.
-
-Before any public repository push or visibility change, separately review the complete tree and history for credentials, private session or project data, internal reports, large generated files, and unwanted personal information. Obtain explicit approval for that review and for the hosting action. Adding a repository URL, homepage, or bugs URL to `package.json` is a later metadata change, not part of the first publication unless hosting is approved first.
-
-## Deferred follow-ups
-
-Do not add these during the first manual release:
-
-- ~~CI publishing, including npm trusted publishing/OIDC and provenance.~~ Delivered 2026-10-25 via Release Please + npm trusted publishing; see **Automated release flow** above.
-- Screenshots or a demo with representative, sanitized data.
-- Ecosystem and community plugin listings.
-
-They follow only after the first manual release is verified.
+Do not use `--allow-published` for release acceptance. Keep the manifest version,
+accepted artifact, registry version, and release tag aligned; do not create a
+second tag or move an existing one. Complete the same postpublication checks
+and release record as for automated publication.
