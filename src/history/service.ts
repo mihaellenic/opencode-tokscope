@@ -32,7 +32,9 @@ export const PUBLISH_INTERVAL_MS = 250
 /** Background catch-up interval: the repeating timer tick while a consumer holds the service. */
 export const RECENT_CATCHUP_MS = 60_000
 /** A full inventory is repeated at least this often; catch-up listings cover the time in between. */
-export const INVENTORY_MIN_INTERVAL_MS = 600_000
+export const INVENTORY_MIN_INTERVAL_MS = 1_800_000
+/** Delays before a second and third attempt of one failed acquisition operation. */
+export const ACQUISITION_RETRY_DELAYS_MS = [1_000, 3_000] as const
 /** Revalidation interval for the background audit rotation. */
 export const AUDIT_INTERVAL_MS = 60_000
 /** Sessions re-scanned per audit tick, least recently scanned first. */
@@ -63,6 +65,26 @@ const DIRTY_EVENT_TYPES: ReadonlySet<string> = new Set([
 ])
 
 const DELETED_EVENT_TYPE = "session.deleted"
+
+/**
+ * One structured diagnostic for background history work. Counters are records actually returned by the
+ * client (including the retries of one operation), never API page counts, and never carry message
+ * contents, credentials, session identifiers, or project paths.
+ */
+export interface HistoryLogEvent {
+  operation: "hydrate" | "event" | "catch-up" | "inventory" | "audit" | "persistence"
+  outcome: "success" | "retry" | "failure" | "cancelled"
+  durationMs: number
+  attempt: number
+  sessionsRead: number
+  messagesRead: number
+}
+
+/** Operations that read through the client and therefore retry and count records. */
+type AcquisitionOperation = "event" | "catch-up" | "inventory" | "audit"
+
+/** Result of an acquisition a reset or teardown overtook: the operation must drop everything it got. */
+const CANCELLED = Symbol("cancelled")
 
 export interface ViewState {
   kind: "loading" | "partial" | "cached" | "ready" | "error"
@@ -100,6 +122,51 @@ type MetadataClient = HarvestClient & {
   session: HarvestClient["session"] & {
     get?: (input: { sessionID: string }) => Promise<SessionMeta>
   }
+}
+
+/** Operation-local view of the shared client: counts the metadata and message records it reads. */
+interface ReadScope {
+  client: MetadataClient
+  sessionsRead: number
+  messagesRead: number
+}
+
+/**
+ * Wraps the shared client for one operation. Reads are forwarded unchanged, so pagination, ordering, and
+ * signatures are untouched; only the returned record counts are observed, and retries add to them.
+ */
+function readScope(base: MetadataClient): ReadScope {
+  const get = base.session.get
+  const scope: ReadScope = {
+    sessionsRead: 0,
+    messagesRead: 0,
+    client: {
+      session: {
+        list: async (input) => {
+          const page = await base.session.list(input)
+          scope.sessionsRead += page.data.length
+          return page
+        },
+        ...(get === undefined
+          ? {}
+          : {
+              get: async (input: { sessionID: string }): Promise<SessionMeta> => {
+                const meta = await get.call(base.session, input)
+                scope.sessionsRead += 1
+                return meta
+              },
+            }),
+      },
+      message: {
+        list: async (input) => {
+          const page = await base.message.list(input)
+          scope.messagesRead += page.data.length
+          return page
+        },
+      },
+    },
+  }
+  return scope
 }
 
 interface ViewEntry {
@@ -191,9 +258,11 @@ export function createHistoryService(deps: {
   delay: (callback: () => void, ms: number) => () => void
   now: () => number
   concurrency?: number
+  log?: (event: HistoryLogEvent) => void
 }): HistoryService {
   const client: MetadataClient = deps.client
   const now = deps.now
+  const log = deps.log
   const concurrency = Math.max(1, deps.concurrency ?? 8)
 
   const records = new Map<string, SessionRecord>()
@@ -218,6 +287,7 @@ export function createHistoryService(deps: {
   let persistence: "ok" | "unavailable" = "ok"
   let widgetPublished = false
   let hydrated = false
+  const retryWaits = new Set<() => void>()
 
   const storedWidget = deps.repository.readWidgetSnapshot()
   const [widgetState, setWidgetState] = createSignal<WidgetSharedState>(
@@ -235,17 +305,145 @@ export function createHistoryService(deps: {
     for (const sessionID of deps.repository.loadTombstones().sessionIDs) tombstones.add(sessionID)
   }
 
+  /** Diagnostics are advisory: a missing or failing sink never reaches acquisition. */
+  function emit(event: HistoryLogEvent): void {
+    if (log === undefined) return
+    try {
+      log(event)
+    } catch {
+      // A broken log sink is not an acquisition failure.
+    }
+  }
+
+  /**
+   * Runs one acquisition operation with at most three attempts. Each attempt reads through the same
+   * operation-local scope, so the counters accumulate the records every attempt returned. A failed
+   * attempt is logged and retried after the injected delay, but only while `guard` (reset/deletion
+   * generation) still holds and a consumer is watching; the final failure is thrown to the operation
+   * that owns the work, and `CANCELLED` means the operation must drop its result without reporting.
+   */
+  async function acquire<T>(
+    operation: AcquisitionOperation,
+    guard: () => boolean,
+    watching: () => boolean,
+    attempt: (scope: ReadScope) => Promise<T>,
+  ): Promise<T | typeof CANCELLED> {
+    const scope = readScope(client)
+    const report = (outcome: HistoryLogEvent["outcome"], attemptNumber: number, startedAt: number): void =>
+      emit({
+        operation,
+        outcome,
+        durationMs: now() - startedAt,
+        attempt: attemptNumber,
+        sessionsRead: scope.sessionsRead,
+        messagesRead: scope.messagesRead,
+      })
+    for (let attemptNumber = 1; ; attemptNumber++) {
+      const startedAt = now()
+      try {
+        const value = await attempt(scope)
+        if (!guard()) {
+          report("cancelled", attemptNumber, startedAt)
+          return CANCELLED
+        }
+        report("success", attemptNumber, startedAt)
+        return value
+      } catch (error) {
+        if (!guard()) {
+          report("cancelled", attemptNumber, startedAt)
+          return CANCELLED
+        }
+        const waitMs = ACQUISITION_RETRY_DELAYS_MS[attemptNumber - 1]
+        if (waitMs === undefined || !watching()) {
+          report("failure", attemptNumber, startedAt)
+          throw error
+        }
+        report("retry", attemptNumber, startedAt)
+        if (!(await waitForRetry(waitMs))) {
+          report("cancelled", attemptNumber, startedAt)
+          return CANCELLED
+        }
+      }
+    }
+  }
+
+  /** Injected-delay wait between attempts; resolved `false` when a reset or teardown aborts it. */
+  function waitForRetry(ms: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      let cancelDelay: (() => void) | undefined
+      const settle = (waited: boolean): void => {
+        if (settled) return
+        settled = true
+        retryWaits.delete(abort)
+        cancelDelay?.()
+        resolve(waited)
+      }
+      const abort = (): void => settle(false)
+      retryWaits.add(abort)
+      const cancel = deps.delay(() => settle(true), ms)
+      if (settled) cancel()
+      else cancelDelay = cancel
+    })
+  }
+
+  /** Reset and teardown abort every pending retry so no stale attempt restarts acquisition. */
+  function cancelRetries(): void {
+    for (const abort of [...retryWaits]) abort()
+  }
+
+  /** Runs a repository write, reporting a persistence failure once without retrying it. */
+  async function persisted(write: () => Promise<void>): Promise<boolean> {
+    const startedAt = now()
+    try {
+      await write()
+      return true
+    } catch {
+      persistence = "unavailable"
+      emit({
+        operation: "persistence",
+        outcome: "failure",
+        durationMs: now() - startedAt,
+        attempt: 1,
+        sessionsRead: 0,
+        messagesRead: 0,
+      })
+      return false
+    }
+  }
+
   /** Rebuilds the in-memory record/index maps from durable shards, at most once per process. */
   function hydrateShards(): void {
     if (hydrated) return
     hydrated = true
-    for (const shard of deps.repository.loadAllShards().values()) {
-      for (const entry of Object.values(shard.index)) {
-        if (!tombstones.has(entry.sessionID)) index.set(entry.sessionID, entry)
+    const startedAt = now()
+    try {
+      for (const shard of deps.repository.loadAllShards().values()) {
+        for (const entry of Object.values(shard.index)) {
+          if (!tombstones.has(entry.sessionID)) index.set(entry.sessionID, entry)
+        }
+        for (const record of Object.values(shard.records)) {
+          if (!tombstones.has(record.sessionID)) records.set(record.sessionID, record)
+        }
       }
-      for (const record of Object.values(shard.records)) {
-        if (!tombstones.has(record.sessionID)) records.set(record.sessionID, record)
-      }
+      emit({
+        operation: "hydrate",
+        outcome: "success",
+        durationMs: now() - startedAt,
+        attempt: 1,
+        sessionsRead: 0,
+        messagesRead: 0,
+      })
+    } catch {
+      // A cache that cannot be read leaves an empty in-memory cache; hydration is never retried.
+      emit({
+        operation: "hydrate",
+        outcome: "failure",
+        durationMs: now() - startedAt,
+        attempt: 1,
+        sessionsRead: 0,
+        messagesRead: 0,
+      })
     }
   }
 
@@ -396,11 +594,7 @@ export function createHistoryService(deps: {
   }
 
   async function persistWidget(rows: WidgetRow[], nowMs: number): Promise<void> {
-    try {
-      await deps.repository.writeWidgetSnapshot(rows, nowMs)
-    } catch {
-      persistence = "unavailable"
-    }
+    await persisted(() => deps.repository.writeWidgetSnapshot(rows, nowMs))
   }
 
   function allSamples(): Sample[] {
@@ -415,15 +609,11 @@ export function createHistoryService(deps: {
     const batch = pendingRecords
     pendingRecords = []
     const flush = (async () => {
-      try {
-        await deps.repository.putRecords(batch, now())
-        // Records are the payload that matters: their write is what earns a clean persistence verdict.
-        persistence = "ok"
-      } catch {
-        // A reset owns the store from here: a pre-reset batch is never written back into it.
-        if (generation === resetGeneration) pendingRecords = [...batch, ...pendingRecords]
-        persistence = "unavailable"
-      }
+      const written = await persisted(() => deps.repository.putRecords(batch, now()))
+      // Records are the payload that matters: their write is what earns a clean persistence verdict.
+      if (written) persistence = "ok"
+      // A reset owns the store from here: a pre-reset batch is never written back into it.
+      else if (generation === resetGeneration) pendingRecords = [...batch, ...pendingRecords]
     })()
     flushInFlight = flush
     try {
@@ -433,14 +623,16 @@ export function createHistoryService(deps: {
     }
   }
 
-  async function readMeta(sessionID: string): Promise<SessionMeta | undefined> {
-    const get = client.session.get
+  async function readMeta(scope: ReadScope, sessionID: string): Promise<SessionMeta | undefined> {
+    const get = scope.client.session.get
     if (get === undefined) return undefined
     try {
-      return await get.call(client.session, { sessionID })
-    } catch {
-      // A session that vanished (or a transient read error) keeps the listing metadata for this pass.
-      return undefined
+      return await get.call(scope.client.session, { sessionID })
+    } catch (error) {
+      // A session that vanished keeps the listing metadata for this pass. Any other read error is a
+      // failed acquisition the owning operation retries, not a session to silently skip.
+      if (isNotFound(error)) return undefined
+      throw error
     }
   }
 
@@ -449,7 +641,7 @@ export function createHistoryService(deps: {
    * invalidates the result before it can be stored; a metadata change mid-scan stores the record but
    * asks for one follow-up so coverage is only claimed for data that matched a stable session.
    */
-  async function scanSession(meta: SessionMeta): Promise<ScanOutcome | undefined> {
+  async function scanSession(scope: ReadScope, meta: SessionMeta): Promise<ScanOutcome | undefined> {
     if (tombstones.has(meta.id)) {
       forgetSession(meta.id)
       return { meta: undefined, requeue: false, discarded: true }
@@ -466,11 +658,11 @@ export function createHistoryService(deps: {
     const token = scanTokenOf(meta.id)
     const current = (): boolean => generation === resetGeneration && scanTokenOf(meta.id) === token
     try {
-      const fresh = (await readMeta(meta.id)) ?? meta
+      const fresh = (await readMeta(scope, meta.id)) ?? meta
       if (!current()) return { meta: undefined, requeue: false, discarded: true }
-      const scan = await scanMessages(client, fresh)
+      const scan = await scanMessages(scope.client, fresh)
       if (!current()) return { meta: undefined, requeue: false, discarded: true }
-      const after = (await readMeta(meta.id)) ?? fresh
+      const after = (await readMeta(scope, fresh.id)) ?? fresh
       if (!current()) return { meta: undefined, requeue: false, discarded: true }
       if (tombstones.has(fresh.id)) {
         forgetSession(fresh.id)
@@ -543,6 +735,7 @@ export function createHistoryService(deps: {
 
   /** Bounded worker pool over the listing order; stops taking new work once no consumer holds the service. */
   async function drain(
+    scope: ReadScope,
     directory: string | undefined,
     items: SessionMeta[],
     onRequeue: (meta: SessionMeta) => void,
@@ -558,7 +751,7 @@ export function createHistoryService(deps: {
         const position = cursor
         cursor += 1
         if (position >= items.length) return
-        const outcome = await scanSession(items[position])
+        const outcome = await scanSession(scope, items[position])
         if (outcome?.requeue === true && outcome.meta !== undefined) onRequeue(outcome.meta)
         await publishProgress(directory)
       }
@@ -580,12 +773,7 @@ export function createHistoryService(deps: {
       fullInventoryCompletedAt: inventory ? startedAt : previous?.fullInventoryCompletedAt,
       recentCatchUpAt: startedAt,
     }
-    try {
-      await deps.repository.writeCoverage(next)
-      coverage.set(directoryKeyOf(directory), next)
-    } catch {
-      persistence = "unavailable"
-    }
+    if (await persisted(() => deps.repository.writeCoverage(next))) coverage.set(directoryKeyOf(directory), next)
   }
 
   async function publishReady(directory: string | undefined): Promise<void> {
@@ -604,11 +792,7 @@ export function createHistoryService(deps: {
         lastCheckedAt: checkedAt,
         savedAtMs: checkedAt,
       }
-      try {
-        await deps.repository.writeViewSnapshot(snapshot)
-      } catch {
-        persistence = "unavailable"
-      }
+      await persisted(() => deps.repository.writeViewSnapshot(snapshot))
     }
     statusFor(directory).publishedAt = checkedAt
     publishViews(directory, "ready")
@@ -616,16 +800,18 @@ export function createHistoryService(deps: {
 
   /**
    * Authoritative existence check for inventory verification. Only a definite not-found authorizes
-   * removal; transport errors, authorization failures, and unexpected responses keep the cache.
+   * removal; any other outcome is an acquisition failure the owning inventory retries, so transport and
+   * authorization errors never remove anything.
    */
-  async function probeSession(sessionID: string): Promise<"present" | "missing" | "unknown"> {
-    const get = client.session.get
+  async function probeSession(scope: ReadScope, sessionID: string): Promise<"present" | "missing" | "unknown"> {
+    const get = scope.client.session.get
     if (get === undefined) return "unknown"
     try {
-      await get.call(client.session, { sessionID })
+      await get.call(scope.client.session, { sessionID })
       return "present"
     } catch (error) {
-      return isNotFound(error) ? "missing" : "unknown"
+      if (isNotFound(error)) return "missing"
+      throw error
     }
   }
 
@@ -634,14 +820,14 @@ export function createHistoryService(deps: {
    * checked individually. Tombstones are released only after a fully verified inventory in which no
    * new deletion was learned, so a session a listing still reports is never re-added while tombstoned.
    */
-  async function verifyInventory(listed: Set<string>, known: readonly string[]): Promise<void> {
-    if (client.session.get === undefined) return
+  async function verifyInventory(scope: ReadScope, listed: Set<string>, known: readonly string[]): Promise<void> {
+    if (scope.client.session.get === undefined) return
     const tombstoned = [...tombstones]
     let removed = false
     let verified = true
     for (const sessionID of known) {
       if (listed.has(sessionID) || tombstones.has(sessionID)) continue
-      const state = await probeSession(sessionID)
+      const state = await probeSession(scope, sessionID)
       if (state === "missing") {
         await deleteSession(sessionID)
         removed = true
@@ -651,18 +837,13 @@ export function createHistoryService(deps: {
     }
     if (removed || !verified) return
     for (const sessionID of tombstoned) {
-      if ((await probeSession(sessionID)) !== "missing") {
+      if ((await probeSession(scope, sessionID)) !== "missing") {
         verified = false
         break
       }
     }
     if (!verified || tombstoned.length === 0) return
-    try {
-      await deps.repository.clearTombstones(now())
-      tombstones.clear()
-    } catch {
-      persistence = "unavailable"
-    }
+    if (await persisted(() => deps.repository.clearTombstones(now()))) tombstones.clear()
   }
 
   /** Removes a session immediately: token first so an in-flight scan cannot store it again. */
@@ -671,11 +852,7 @@ export function createHistoryService(deps: {
     tombstones.add(sessionID)
     const directory = records.get(sessionID)?.directory ?? index.get(sessionID)?.directory
     forgetSession(sessionID)
-    try {
-      await deps.repository.removeSessions([sessionID], now())
-    } catch {
-      persistence = "unavailable"
-    }
+    await persisted(() => deps.repository.removeSessions([sessionID], now()))
     await publishSessionWork([directory], "settled")
   }
 
@@ -725,20 +902,31 @@ export function createHistoryService(deps: {
   }
 
   /** Scans one session outside a listing pass; returns whether a scan ran and where it belongs. */
-  async function scanOne(sessionID: string): Promise<SessionScanResult> {
-    const meta = await readMeta(sessionID)
-    if (meta === undefined) return { scanned: false, directory: undefined }
-    const directory = meta.location?.directory
-    if (tombstones.has(sessionID)) {
-      forgetSession(sessionID)
-      return { scanned: false, directory }
-    }
+  async function scanOne(operation: "event" | "audit", sessionID: string): Promise<SessionScanResult> {
+    const generation = resetGeneration
+    let directory: string | undefined
     try {
-      await scanSession(meta)
-      return { scanned: true, directory }
+      const outcome = await acquire(
+        operation,
+        () => generation === resetGeneration,
+        () => holds > 0,
+        async (scope) => {
+          const meta = await readMeta(scope, sessionID)
+          if (meta === undefined) return false
+          directory = meta.location?.directory
+          if (tombstones.has(sessionID)) {
+            forgetSession(sessionID)
+            return false
+          }
+          await scanSession(scope, meta)
+          return true
+        },
+      )
+      if (outcome === CANCELLED) return { scanned: false, directory: undefined }
+      return { scanned: outcome, directory }
     } catch {
-      // A failed scan retains the previous record and reports the refresh failure.
-      publishSessionFailure(directory)
+      // Exhausted retries: the previous record stays and the refresh reports the failure.
+      publishSessionFailure(directory ?? records.get(sessionID)?.directory ?? index.get(sessionID)?.directory)
       return { scanned: false, directory }
     }
   }
@@ -755,7 +943,7 @@ export function createHistoryService(deps: {
     void Promise.resolve()
       .then(async () => {
         state.pending = false
-        const result = await scanOne(sessionID)
+        const result = await scanOne("event", sessionID)
         if (!result.scanned) return
         await publishSessionWork([result.directory], "progress")
       })
@@ -820,7 +1008,7 @@ export function createHistoryService(deps: {
     const directories: (string | undefined)[] = []
     for (const sessionID of auditCandidates()) {
       if (holds === 0) break
-      const result = await scanOne(sessionID)
+      const result = await scanOne("audit", sessionID)
       if (result.scanned) directories.push(result.directory)
     }
     if (directories.length > 0) await publishSessionWork(directories, "settled")
@@ -838,65 +1026,65 @@ export function createHistoryService(deps: {
       previous?.fullInventoryCompletedAt === undefined ||
       startedAt - previous.fullInventoryCompletedAt > INVENTORY_MIN_INTERVAL_MS
     try {
-      const listing = await listSessions(
-        client,
-        inventory || previous?.recentCatchUpAt === undefined
-          ? { directory }
-          : { directory, fromMs: previous.recentCatchUpAt },
+      const outcome = await acquire(
+        inventory ? "inventory" : "catch-up",
+        () => generation === resetGeneration,
+        () => holds > 0,
+        async (scope): Promise<"settled" | "superseded"> => {
+          const listing = await listSessions(
+            scope.client,
+            inventory || previous?.recentCatchUpAt === undefined
+              ? { directory }
+              : { directory, fromMs: previous.recentCatchUpAt },
+          )
+          // A reset superseded this pass: it owns the store and schedules the next pass itself.
+          if (generation !== resetGeneration) return "superseded"
+          rememberTombstones()
+          const known: string[] = []
+          if (inventory) {
+            for (const entry of index.values()) {
+              if (tombstones.has(entry.sessionID)) continue
+              if (!matchesScope(entry.directory, directory)) continue
+              known.push(entry.sessionID)
+            }
+          }
+          const listed = new Set<string>()
+          const queue: SessionMeta[] = []
+          for (const meta of listing.sessions) {
+            listed.add(meta.id)
+            if (tombstones.has(meta.id)) {
+              forgetSession(meta.id)
+              continue
+            }
+            const existing = records.get(meta.id)
+            if (existing !== undefined && existing.signature === signatureFor(meta)) continue
+            queue.push(meta)
+          }
+          if (inventory) await verifyInventory(scope, listed, known)
+
+          const requeue: SessionMeta[] = []
+          const abandoned = await drain(scope, directory, queue, (meta) => {
+            if (!requeue.some((item) => item.id === meta.id)) requeue.push(meta)
+          })
+          if (abandoned) {
+            cancelPublish(directory)
+            return "superseded"
+          }
+          const abandonedAgain = await drain(scope, directory, requeue, () => {})
+          if (abandonedAgain) {
+            cancelPublish(directory)
+            return "superseded"
+          }
+          if (generation !== resetGeneration) return "superseded"
+
+          await flushRecords()
+          if (generation !== resetGeneration) return "superseded"
+          await commitCoverage(directory, startedAt, inventory, previous)
+          return generation === resetGeneration ? "settled" : "superseded"
+        },
       )
-      if (generation !== resetGeneration) {
-        // A reset superseded this pass: it owns the store and schedules the next pass itself.
-        status.refreshing = true
-        return
-      }
-      rememberTombstones()
-      const known: string[] = []
-      if (inventory) {
-        for (const entry of index.values()) {
-          if (tombstones.has(entry.sessionID)) continue
-          if (!matchesScope(entry.directory, directory)) continue
-          known.push(entry.sessionID)
-        }
-      }
-      const listed = new Set<string>()
-      const queue: SessionMeta[] = []
-      for (const meta of listing.sessions) {
-        listed.add(meta.id)
-        if (tombstones.has(meta.id)) {
-          forgetSession(meta.id)
-          continue
-        }
-        const existing = records.get(meta.id)
-        if (existing !== undefined && existing.signature === signatureFor(meta)) continue
-        queue.push(meta)
-      }
-      if (inventory) await verifyInventory(listed, known)
-
-      const requeue: SessionMeta[] = []
-      const abandoned = await drain(directory, queue, (meta) => {
-        if (!requeue.some((item) => item.id === meta.id)) requeue.push(meta)
-      })
-      if (abandoned) {
-        cancelPublish(directory)
-        return
-      }
-      const abandonedAgain = await drain(directory, requeue, () => {})
-      if (abandonedAgain) {
-        cancelPublish(directory)
-        return
-      }
-      if (generation !== resetGeneration) {
-        status.refreshing = true
-        return
-      }
-
-      await flushRecords()
-      if (generation !== resetGeneration) {
-        status.refreshing = true
-        return
-      }
-      await commitCoverage(directory, startedAt, inventory, previous)
-      if (generation !== resetGeneration) {
+      if (outcome !== "settled") {
+        // Cancelled or superseded: the cache belongs to whoever overtook this pass.
         status.refreshing = true
         return
       }
@@ -962,6 +1150,7 @@ export function createHistoryService(deps: {
 
   function stopTimers(): void {
     cancelPublications()
+    cancelRetries()
     burstCancel?.()
     burstCancel = undefined
     burstStartedAt = undefined
@@ -1012,6 +1201,7 @@ export function createHistoryService(deps: {
   async function reset(): Promise<void> {
     // In-flight scans from before the reset are invalidated here and discarded on completion.
     resetGeneration += 1
+    cancelRetries()
     cancelPublications()
     burstCancel?.()
     burstCancel = undefined
@@ -1033,13 +1223,9 @@ export function createHistoryService(deps: {
       entry.lastCheckedAt = undefined
       entry.publish(buildState(entry.request, "loading", undefined, true, false))
     }
-    try {
-      // Settle a batch already handed to the repository, then wipe the store it wrote into.
-      await flushInFlight
-      await deps.repository.clear()
-    } catch {
-      persistence = "unavailable"
-    }
+    // Settle a batch already handed to the repository, then wipe the store it wrote into.
+    await flushInFlight
+    await persisted(() => deps.repository.clear())
     for (const directory of requestedDirectories()) ensurePass(directory)
   }
 

@@ -1,7 +1,7 @@
 import { type HarvestClient, type SessionMeta } from "../../src/harvest"
 import { createMemoryStore, createRepository, type HistoryRepository } from "../../src/history/durable"
 import type { SessionRecord } from "../../src/history/records"
-import { createHistoryService, type HistoryService } from "../../src/history/service"
+import { createHistoryService, type HistoryLogEvent, type HistoryService } from "../../src/history/service"
 import type { AssistantMessage } from "../../src/metric"
 
 export const DAY_MS = 86_400_000
@@ -98,6 +98,8 @@ export class FakeClient implements HarvestClient {
   /** Called once per message page read, before the page resolves. */
   onScan: ((call: Parameters<HarvestClient["message"]["list"]>[0]) => void) | undefined
   failListing = false
+  /** Remaining listing calls that throw before one succeeds, for deterministic retry sequences. */
+  listingFailures = 0
   inFlight = 0
   maxInFlight = 0
 
@@ -111,6 +113,10 @@ export class FakeClient implements HarvestClient {
     ): Promise<SessionPage> => {
       this.sessionCalls.push(input ?? {})
       if (this.failListing) throw new Error("listing failed")
+      if (this.listingFailures > 0) {
+        this.listingFailures -= 1
+        throw new Error("listing failed")
+      }
       if (this.listingDelay !== undefined) await this.listingDelay()
       const directory = input?.directory
       const all = this.sessions
@@ -261,6 +267,7 @@ export function createService(
   options: {
     concurrency?: number
     subscribeEvents?: (handler: (event: { type: string; data?: { sessionID?: string } }) => void) => () => void
+    log?: (event: HistoryLogEvent) => void
   } = {},
 ): HistoryService {
   return createHistoryService({
@@ -271,7 +278,14 @@ export function createService(
     delay: clock.delay,
     now: clock.now,
     ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
+    ...(options.log === undefined ? {} : { log: options.log }),
   })
+}
+
+/** Collects service diagnostics for assertions without printing them. */
+export function createLog(): { events: HistoryLogEvent[]; log: (event: HistoryLogEvent) => void } {
+  const events: HistoryLogEvent[] = []
+  return { events, log: (event) => events.push(event) }
 }
 
 export function storedRecords(repository: HistoryRepository): SessionRecord[] {
