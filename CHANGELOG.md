@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.2.0...v0.3.0) (2026-10-26)
+
+
+### Features
+
+* **history:** add refresh diagnostics, bounded retries, and 30-minute inventory ([df1568d](https://github.com/mihaellenic/opencode-tokscope/commit/df1568da32491122f5bbfee27befd3c47b908d68))
+* log history refresh durations to a private log file ([75d30b7](https://github.com/mihaellenic/opencode-tokscope/commit/75d30b7b8c7515f6bc180ea6085e9d75135603cc))
+* quiet history refreshes with diagnostics and 30-minute inventory ([3a6d75e](https://github.com/mihaellenic/opencode-tokscope/commit/3a6d75e0a5d6495dfc8186039d52a97c742756cd))
+* quiet page and sidebar refresh presentation ([fe90b6e](https://github.com/mihaellenic/opencode-tokscope/commit/fe90b6eb4f844565b4826dc5fcf374f29a1833b8))
+
+
+### Bug Fixes
+
+* allow five minutes for npm propagation in release verification ([e0f22de](https://github.com/mihaellenic/opencode-tokscope/commit/e0f22ded8d1849591248a4cd6d0017aba09574c6))
+* allow five minutes for npm propagation in release verification ([9223411](https://github.com/mihaellenic/opencode-tokscope/commit/9223411a4871e13fb84c5087b9e07ed9572762b4))
+* drop unbound trend hint and cover ready sidebar rows ([aa49c75](https://github.com/mihaellenic/opencode-tokscope/commit/aa49c75146f1bb90aac9995a8806ec8664cff600))
+* **history:** cancel abandoned passes and settle retries before overlap ([19c465c](https://github.com/mihaellenic/opencode-tokscope/commit/19c465c27ef04df0276da657a496ebd2b7abc09f))
+
 ## [0.2.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.1.0...v0.2.0) (2026-10-26)
 
 
