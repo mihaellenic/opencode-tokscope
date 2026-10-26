@@ -462,9 +462,7 @@ describe("release PR validation workflow", () => {
       "`opened`, `synchronize`, and `reopened`",
       "Validate release PR / release-pr-validation",
       "not a required check",
-      "ruleset `main protection` (ID `25836446`)",
-      "no required status checks",
-      "pre-fix",
+      "verify the live branch rules",
     ]) {
       expect(docs).toContain(line)
     }
@@ -474,21 +472,18 @@ describe("release PR validation workflow", () => {
     expect(docs).not.toContain("separate report job")
   })
 
-  test("documents head-only freshness, diagnostic evidence, cache limits, and rollout", () => {
+  test("documents head-only freshness and diagnostic evidence", () => {
     const docs = read("docs/releasing.md")
     for (const line of [
-      "head and PR state at that check only",
+      "state at that check only",
       "not the current base or merge result",
       "unsigned and diagnostic",
       "not a publishing attestation",
-      "per pull request, not per head",
-      "can read default-branch caches",
-      "independent of the PR evidence, not of the code on the tag",
-      "fix(ci): isolate release PR validation",
-      "gh pr close 1 --repo mihaellenic/opencode-tokscope",
-      "gh pr reopen 1 --repo mihaellenic/opencode-tokscope",
-      "does not verify bot triggering",
-      "Never revive the removed PR-code dispatch",
+      "exact tag, not floating `main`",
+      "never downloads",
+      "OIDC trusted publishing",
+      "duplicate-version guard",
+      "Do not use `--allow-published` for release acceptance",
     ]) {
       expect(docs).toContain(line)
     }
@@ -497,8 +492,8 @@ describe("release PR validation workflow", () => {
   test("documents the run summary separately from the evidence artifact", () => {
     const docs = read("docs/releasing.md")
     expect(docs).toContain("**Summary** tab and logs")
-    expect(docs).toContain("human-readable acceptance, audit, and head-freshness summary")
-    expect(docs).toContain("human-readable summary is not part of the artifact directory")
+    expect(docs).toContain("acceptance, consumer audit, and head freshness")
+    expect(docs).toContain("not the artifact directory")
     expect(docs).toContain("`artifact.json`")
     expect(docs).toContain("`npm-audit-omit-dev.json`")
     expect(docs).toContain("`accepted-audit-exceptions.json`")
@@ -506,91 +501,42 @@ describe("release PR validation workflow", () => {
     expect(docs).not.toContain("raw audit, acceptance summary, and `head-status.json`")
   })
 
-  test("records hosted release PR validation evidence and the gates still pending", () => {
+  test("documents security gates and evidence retention", () => {
     const docs = read("docs/releasing.md")
-    expect(docs).not.toContain("No acceptance evidence exists for this remediation")
-    expect(docs).not.toContain("alerts 1–7 still open")
-    expect(docs).not.toContain("b0977006")
-    expect(docs).not.toContain("disappears when the artifact expires")
-    expect(docs).not.toContain("an owner-approved run of a bot-created PR event")
     for (const line of [
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237780191",
-      "`github-actions[bot]`",
-      "triggering actor is `mihaellenic`",
-      "54e341e8cbc334d52efb5cf4a413dd2e25882484",
-      "release-pr-evidence-1-2",
-      "12615642893",
-      "2026-11-08T21:57:43Z",
-      "436c62daa569d636c08482f73fd58ab3f5a19a7b5b9fbb396a5e35a28e183132",
-      "sha512-1cIpIGcvsF58cXeucktmbpTAv7lyvxRC2NZvy3J6Us7IULL4nQ8hF8Q1w34cyz9oBENIjKb6+yTqWFEbiy2eZw==",
-      "outcome `current`",
-      "NOT a clean audit",
-      "seroval-ssr-unreachable-2026-11-07",
-      "https://github.com/mihaellenic/opencode-tokscope/issues/2",
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40237738234",
-      "alerts 1–7 were `fixed`",
-      "local copy persists until it is manually removed",
-      "does not capture the original pending-approval screen",
-      "release-pr-evidence-1-1",
-      "registry-guard",
-      "No publication, OIDC trusted-publishing smoke test",
+      "14-day retention",
+      "release-pr-evidence-<PR>-<attempt>",
+      "release-evidence-<tag>",
+      "High/critical advisories block acceptance",
+      "owner-authorized, issue-linked, unexpired exception",
+      "not a clean audit",
+      "An issue alone does not remove a blocker",
     ]) {
       expect(docs).toContain(line)
     }
   })
 
-  test("records hosted negative-path rejection evidence and its limits", () => {
+  test("documents isolated published-package verification", () => {
     const docs = read("docs/releasing.md")
-    expect(docs).not.toContain("controlled hosted negative-path runs (step 6)")
-    expect(docs).not.toContain("not an end-to-end hosted negative-path observation")
     for (const line of [
-      "Hosted negative-path rejection tests (2026-10-25)",
-      "controlled test branches, not actual release forks or malicious-fork proof",
-      "https://github.com/mihaellenic/opencode-tokscope/pull/8",
-      "https://github.com/mihaellenic/opencode-tokscope/pull/9",
-      "https://github.com/mihaellenic/opencode-tokscope/pull/10",
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239966134",
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40239980624",
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240102996",
-      "https://github.com/mihaellenic/opencode-tokscope/actions/runs/40240176037",
-      "d78ad67cce8454d6969cd04d718b555e62b8d53d",
-      "e2860aeff2f9885d901a3f07d307855c3963e139",
-      "948ee7a0c99ad2da900f6e6aabf65979377e9543",
-      "b66fb934393f277b46f8caf048e0e0db16f7656d",
-      "controlled-negative/identity-mismatch",
-      "failed before any checkout",
-      "every production step is `skipped`",
-      "`total_count: 0`",
-      "version 0.1.0 is already published",
-      "same already-published `0.1.0` registry guard",
-      "`--allow-published` was not used",
-      "outcome `stale`",
-      "PR state `open`",
-      "release-pr-evidence-10-1",
-      "12616692086",
-      "sha256:b0280956ef55884086f404cbcf898ce1edd068906965ba49a01eb6d424c857e4",
-      "The net diff from `54e341e` to `b66fb93` is empty",
-      "never authorized publication",
-      "no Release workflow run",
-      "were closed without merging",
-      "remains an open draft",
-      "No test injected a job-level `if` filter",
-      "controlled diagnostic tests, not a security guarantee",
-      "local ignored archives",
-      "https://github.com/mihaellenic/opencode-tokscope/issues/11",
-      "not fixed",
+      "owner-run checks after automated publication",
+      "real OpenCode in tmux",
+      "standalone server",
+      "opencode-tokscope@X.Y.Z",
+      "opencode plugin add opencode-tokscope",
+      "preserves existing keys",
+      "cache restoration after relaunch",
+      "corrected **new version**",
     ]) {
       expect(docs).toContain(line)
     }
   })
 
-  test("attributes Node and npm to the controller environment, not the Bun commands", () => {
+  test("links tool versions to the workflow source of truth", () => {
     const docs = read("docs/releasing.md")
-    expect(docs).not.toContain("With Bun 1.4.4, Node 24.22.1, and npm 11.19.1")
-    expect(docs).toContain("controller-environment.log")
-    expect(docs).toContain("controller separately observed Node 24.22.1 and npm 11.19.1 in its own shell")
-    expect(docs).toContain("not inputs to the Bun commands")
-    expect(docs).toContain("npm `11.16.0`")
+    expect(docs).toContain("Workflow tool versions are defined in")
+    expect(docs).toContain("../.github/workflows/release.yml")
+    expect(docs).toContain("../.github/workflows/validate-release-pr.yml")
   })
 
   test("never executes PR code through pull_request_target", () => {

@@ -1,5 +1,9 @@
 # opencode-tokscope
 
+[![npm version](https://img.shields.io/npm/v/opencode-tokscope.svg)](https://www.npmjs.com/package/opencode-tokscope)
+[![license](https://img.shields.io/npm/l/opencode-tokscope.svg)](https://github.com/mihaellenic/opencode-tokscope/blob/main/LICENSE)
+[![made for OpenCode](https://img.shields.io/badge/made%20for-OpenCode%20V2-1024D3)](https://opencode.ai/docs/plugins/)
+
 **Which models and providers are fastest in your actual OpenCode usage? And are they getting faster or slower?**
 
 Tokscope is an OpenCode V2 terminal UI plugin with:
