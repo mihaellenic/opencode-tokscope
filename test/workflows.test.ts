@@ -85,9 +85,9 @@ describe("CI workflow structure", () => {
   })
 
   test("pins the installed Bun version", () => {
-    expect(ci).toContain("bun-version: 1.1.3")
-    expect(release).toContain("bun-version: 1.1.3")
-    expect(validate).toContain("bun-version: 1.1.3")
+    expect(ci).toContain("bun-version: 1.4.4")
+    expect(release).toContain("bun-version: 1.4.4")
+    expect(validate).toContain("bun-version: 1.4.4")
   })
 })
 
@@ -305,7 +305,7 @@ describe("release PR validation workflow", () => {
     expect(validateJob).toContain("node-version: 24")
     expect(validateJob).toContain("package-manager-cache: false")
     expect(validateJob).toContain('test "$(npm --version)" = "11.16.0"')
-    expect(validateJob).toContain("bun-version: 1.1.3")
+    expect(validateJob).toContain("bun-version: 1.4.4")
     expect(validateJob).not.toContain("npm@latest")
   })
 
