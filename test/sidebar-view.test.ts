@@ -48,7 +48,7 @@ describe("widgetView", () => {
   })
 
   test("retained rows outrank a loading or failed status and carry no stale marking", () => {
-    for (const status of ["loading", "error"] as const) {
+    for (const status of ["ready", "loading", "error"] as const) {
       const view = widgetView(state({ status, rows, stale: true }), 37, entries)
 
       expect(view?.pending).toBe(false)

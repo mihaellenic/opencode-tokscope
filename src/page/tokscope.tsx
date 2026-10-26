@@ -7,6 +7,7 @@ import type { HistoryService, ViewState } from "../history/service"
 import { Spinner } from "../spinner"
 import { applyReasoningFilter, comparisonRows, dailySeries, type ReasoningFilter } from "../stats"
 import { Header, rangeLabel, reasoningLabel } from "./header"
+import { HELP_LINE } from "./help"
 import { nextSelection } from "./selection"
 import { pickViewPageState, type PageState } from "./state"
 import { EmptyState, UnmeasurableState } from "./states"
@@ -24,8 +25,6 @@ const RANGE_OPTIONS: { title: string; value: RangeFilter }[] = [
   { title: "Last 90 days", value: "last90" },
   { title: "All history", value: "all" },
 ]
-
-const HELP_LINE = "↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back · reset history in palette"
 
 export function TokscopePage(props: {
   context: Plugin.Context
