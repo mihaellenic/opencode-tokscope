@@ -498,13 +498,14 @@ export function publishedArtifactProblem(
   return null
 }
 
-/** Retry bounded propagation failures; fail immediately on a wrong published artifact. */
+/** Retry propagation failures every five seconds for up to five minutes of waits;
+ * registry request time is additional. Fail immediately on a wrong published artifact. */
 export async function verifyPublishedArtifact(
   metadata: ArtifactMetadata,
   lookup: () => PublishedLookup,
   options: { attempts?: number; delayMs?: number; wait?: (ms: number) => Promise<void> } = {},
 ): Promise<VerificationOutcome> {
-  const attempts = options.attempts ?? 6
+  const attempts = options.attempts ?? 61
   const delayMs = options.delayMs ?? 5_000
   const wait = options.wait ?? ((ms: number) => new Promise<void>((resolveWait) => setTimeout(resolveWait, ms)))
   let last = "no registry response"
