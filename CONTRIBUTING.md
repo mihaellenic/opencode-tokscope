@@ -14,7 +14,7 @@ bun run build
 
 `Bun.build` with the Solid transform from `@opentui/solid/bun-plugin` produces `dist/tui.js`. Host-provided modules stay **external** so OpenCode's runtime-plugin transform binds them to the TUI's own instances: `effect`, `@opencode/plugin` (and subpaths), `solid-js`, `@opentui/core`, `@opentui/solid`, `@opentui/keymap` (and subpaths). Bundling those produces a second Solid/OpenTUI runtime and the page fails with `No renderer found`.
 
-Development pins match the tested host (`opencode v2.1.2`): `@opencode/plugin@2.1.2`, `@opencode/client@2.1.2`, `@opentui/*@0.6.6`, `solid-js@1.9.15`.
+Development pins match the tested host (`opencode v2.1.2`): `@opencode/plugin@2.1.2`, `@opencode/client@2.1.2`, `@opentui/*@0.6.6`, `solid-js@1.9.17`.
 
 For local discovery, symlink the checkout into OpenCode's plugin directory:
 
