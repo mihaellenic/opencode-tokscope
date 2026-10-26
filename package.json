@@ -1,15 +1,31 @@
 {
   "name": "opencode-tokscope",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Model and provider throughput comparisons for OpenCode V2.",
-  "keywords": ["opencode", "opencode-plugin", "tui", "tokens", "throughput"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "tokens",
+    "throughput"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/mihaellenic/opencode-tokscope.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mihaellenic/opencode-tokscope.git"
+  },
   "author": "Mihael Lenic",
   "type": "module",
-  "exports": { "./tui": "./dist/tui.js" },
-  "files": ["dist/", "tui.js"],
-  "publishConfig": { "access": "public" },
+  "exports": {
+    "./tui": "./dist/tui.js"
+  },
+  "files": [
+    "dist/",
+    "tui.js"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "bun scripts/build.ts",
     "test": "bun test",
