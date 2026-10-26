@@ -2,22 +2,6 @@ import type { Plugin } from "@opencode/plugin/tui"
 import type { Filters } from "../filters"
 import { rangeLabel, reasoningLabel, scopeLabel } from "./header"
 
-export function LoadingState(props: { context: Plugin.Context; sessions: number }) {
-  const theme = props.context.theme
-  const detail = () => (props.sessions > 0 ? ` ${props.sessions} sessions` : "")
-  return <text fg={theme.text.muted}>{`Scanning history…${detail()}`}</text>
-}
-
-export function ErrorState(props: { context: Plugin.Context }) {
-  const theme = props.context.theme
-  return (
-    <box flexDirection="column" gap={1}>
-      <text fg={theme.text.feedback.error.base}>Could not read history</text>
-      <text fg={theme.text.muted}>Press enter to retry.</text>
-    </box>
-  )
-}
-
 export function EmptyState(props: { context: Plugin.Context; filters: Filters }) {
   const theme = props.context.theme
   return (

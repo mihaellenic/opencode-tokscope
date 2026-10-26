@@ -3,13 +3,8 @@ import type { Plugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions, type JSX } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { modelDisplayName } from "../format"
-import {
-  HEADING_BRAND,
-  LOADING_MESSAGE,
-  NO_QUALIFYING_MESSAGE,
-  READ_ERROR_MESSAGE,
-  type WidgetEntry,
-} from "./layout"
+import { Spinner } from "../spinner"
+import { HEADING_BRAND, NO_QUALIFYING_MESSAGE, type WidgetEntry } from "./layout"
 import type { WidgetStore } from "./store"
 import { widgetView } from "./view"
 
@@ -102,13 +97,10 @@ export function TokscopeSidebar(props: {
               }
             </For>
 
-            <Show when={current.status === "loading"}>
-              <text fg={theme.text.muted}>{LOADING_MESSAGE}</text>
+            <Show when={current.pending}>
+              <Spinner context={props.context} />
             </Show>
-            <Show when={current.status === "error"}>
-              <text fg={theme.text.feedback.error.base}>{READ_ERROR_MESSAGE}</text>
-            </Show>
-            <Show when={current.status === "ready"}>
+            <Show when={!current.pending}>
               <Show
                 when={current.lines.length > 0}
                 fallback={<text fg={theme.text.muted}>{NO_QUALIFYING_MESSAGE}</text>}

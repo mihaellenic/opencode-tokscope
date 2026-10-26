@@ -90,7 +90,7 @@ const right = [
 ]
 while (right.length < 24) right.push(line())
 right.push(
-  [{ text: headingLine(41, false)[0].slice(0, 8), color: foreground, bold: true }, { text: headingLine(41, false)[0].slice(8) }],
+  [{ text: headingLine(41)[0].slice(0, 8), color: foreground, bold: true }, { text: headingLine(41)[0].slice(8) }],
   ...entryLines(widgetRows(samples, now).map((row) => ({
     model: modelName(row.providerID, row.modelID), provider: providerName(row.providerID), median: row.median,
   })), 41).map((text) => line(text)),

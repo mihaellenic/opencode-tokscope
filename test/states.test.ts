@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Sample, UnavailableSample } from "../src/metric"
-import { pickPageState, pickViewPageState, type PageView } from "../src/page/state"
+import { pickViewPageState, type PageView } from "../src/page/state"
 
 const sample: Sample = {
   providerID: "anthropic",
@@ -17,58 +17,42 @@ const unavailable: UnavailableSample = {
   completedAt: 1_000,
 }
 
-describe("pickPageState", () => {
-  test("loading while the resource has no result", () => {
-    expect(pickPageState(undefined, [], [])).toBe("loading")
-  })
-
-  test("error when the resource carries an error", () => {
-    expect(pickPageState({ error: new Error("boom") }, [sample], [unavailable])).toBe("error")
-  })
-
-  test("empty when no measured and no unavailable history matches", () => {
-    expect(pickPageState({ error: undefined }, [], [])).toBe("empty")
-  })
-
-  test("unmeasurable when history exists but nothing is recoverable", () => {
-    expect(pickPageState({ error: undefined }, [], [unavailable])).toBe("unmeasurable")
-  })
-
-  test("ready when any sample is measurable", () => {
-    expect(pickPageState({ error: undefined }, [sample], [])).toBe("ready")
-  })
-})
+const PENDING = ["loading", "partial", "cached", "error"] as const
+const SETTLED = ["ready", "error"] as const
 
 const view = (overrides: Partial<PageView> = {}): PageView => ({
   kind: "ready",
   samples: [sample],
   unavailable: [],
-  persistence: "ok",
-  lastCheckedAt: 1_000,
   ...overrides,
 })
 
 describe("pickViewPageState", () => {
-  test("loading while the service has nothing to show yet", () => {
-    expect(pickViewPageState(view({ kind: "loading", samples: [] }))).toBe("loading")
+  test("retained measurements outrank every pending or failed publication", () => {
+    for (const kind of PENDING) {
+      expect(pickViewPageState(view({ kind }))).toBe("ready")
+    }
   })
 
-  test("published partial and cached data use the ready content", () => {
-    expect(pickViewPageState(view({ kind: "partial" }))).toBe("ready")
-    expect(pickViewPageState(view({ kind: "cached" }))).toBe("ready")
+  test("retained unavailable history outranks every pending or failed publication", () => {
+    for (const kind of PENDING) {
+      expect(pickViewPageState(view({ kind, samples: [], unavailable: [unavailable] }))).toBe("unmeasurable")
+    }
   })
 
-  test("a failed refresh keeps its retained rows on screen", () => {
-    expect(pickViewPageState(view({ kind: "error" }))).toBe("ready")
-    expect(pickViewPageState(view({ kind: "error", samples: [], unavailable: [unavailable] }))).toBe("unmeasurable")
+  test("spins only while an empty view is still pending", () => {
+    for (const kind of ["loading", "partial", "cached"] as const) {
+      expect(pickViewPageState(view({ kind, samples: [], unavailable: [] }))).toBe("loading")
+    }
   })
 
-  test("a failed refresh with nothing retained is an error", () => {
-    expect(pickViewPageState(view({ kind: "error", samples: [], unavailable: [] }))).toBe("error")
+  test("a settled or failed empty view is the normal empty state", () => {
+    for (const kind of SETTLED) {
+      expect(pickViewPageState(view({ kind, samples: [], unavailable: [] }))).toBe("empty")
+    }
   })
 
-  test("an empty or unmeasurable cache keeps its own state", () => {
-    expect(pickViewPageState(view({ samples: [], unavailable: [] }))).toBe("empty")
-    expect(pickViewPageState(view({ samples: [], unavailable: [unavailable] }))).toBe("unmeasurable")
+  test("a measured call keeps the ready content even beside unavailable history", () => {
+    expect(pickViewPageState(view({ samples: [sample], unavailable: [unavailable] }))).toBe("ready")
   })
 })

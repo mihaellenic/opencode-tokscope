@@ -1,15 +1,16 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createMemo, createSignal, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, Match, Switch } from "solid-js"
 import { DEFAULT_FILTERS, rangeStartMs, type Filters, type RangeFilter, type ScopeFilter } from "../filters"
 import { formatCoverage, modelDisplayName } from "../format"
 import type { HistoryService, ViewState } from "../history/service"
+import { Spinner } from "../spinner"
 import { applyReasoningFilter, comparisonRows, dailySeries, type ReasoningFilter } from "../stats"
 import { Header, rangeLabel, reasoningLabel } from "./header"
-import { bannerMessage, footerStatusSuffix } from "./heading-status"
+import { HELP_LINE } from "./help"
 import { nextSelection } from "./selection"
 import { pickViewPageState, type PageState } from "./state"
-import { EmptyState, ErrorState, LoadingState, UnmeasurableState } from "./states"
+import { EmptyState, UnmeasurableState } from "./states"
 import { ComparisonTable } from "./table"
 import { TrendPanel } from "./trend"
 
@@ -24,8 +25,6 @@ const RANGE_OPTIONS: { title: string; value: RangeFilter }[] = [
   { title: "Last 90 days", value: "last90" },
   { title: "All history", value: "all" },
 ]
-
-const HELP_LINE = "↑↓ select · enter trend · ←→ day · s scope · t range · r reasoning · esc back · reset history in palette"
 
 export function TokscopePage(props: {
   context: Plugin.Context
@@ -171,14 +170,6 @@ export function TokscopePage(props: {
       { bind: "s", title: "scope", run: pickScope },
       { bind: "t", title: "time range", run: pickRange },
       { bind: "r", title: "reasoning", run: pickReasoning },
-      {
-        bind: "enter",
-        title: "retry",
-        run: () => {
-          // A failed refresh over retained rows keeps the cache on screen; both are retryable.
-          if (state().kind === "error") props.service.refreshNow()
-        },
-      },
     ],
   }))
 
@@ -198,21 +189,10 @@ export function TokscopePage(props: {
     >
       <Header context={props.context} filters={filters()} />
 
-      <Show when={bannerMessage(state())}>
-        {(message) => (
-          <text fg={state().kind === "error" ? theme.text.feedback.error.base : theme.text.muted}>
-            {message()}
-          </text>
-        )}
-      </Show>
-
       <box flexGrow={1} flexDirection="column" gap={1}>
         <Switch>
           <Match when={pageState() === "loading"}>
-            <LoadingState context={props.context} sessions={state().scanned} />
-          </Match>
-          <Match when={pageState() === "error"}>
-            <ErrorState context={props.context} />
+            <Spinner context={props.context} />
           </Match>
           <Match when={pageState() === "empty"}>
             <EmptyState context={props.context} filters={filters()} />
@@ -243,7 +223,7 @@ export function TokscopePage(props: {
         </Switch>
       </box>
 
-      <text fg={theme.text.muted}>{HELP_LINE + coverage() + footerStatusSuffix(state())}</text>
+      <text fg={theme.text.muted}>{HELP_LINE + coverage()}</text>
     </box>
   )
 }

@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
 import { createRepository } from "./history/durable"
 import { createPluginDurableStore } from "./history/plugin-storage"
+import { createHistoryFileLogger } from "./history/log-file"
 import { createHistoryService } from "./history/service"
 import { TokscopePage } from "./page/tokscope"
 import { createWidgetStore } from "./sidebar/store"
@@ -23,6 +24,7 @@ export default Plugin.define({
     // One durable namespace and one acquisition pipeline for every server and view. The hold lives
     // for the plugin, so the cache keeps catching up while OpenCode runs even with no page open.
     let unsubscribeEvents: (() => void) | undefined
+    const historyLogger = createHistoryFileLogger()
     const service = createHistoryService({
       client: context.client,
       repository: createRepository(createPluginDurableStore(context.storage)),
@@ -41,6 +43,7 @@ export default Plugin.define({
         return () => clearTimeout(id)
       },
       now: () => Date.now(),
+      log: historyLogger.log,
     })
     const release = service.hold()
     // The sidebar reads the same service and holds it while mounted, so both views share one cache.

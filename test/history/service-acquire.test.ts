@@ -3,7 +3,12 @@ import { rangeStartMs } from "../../src/filters"
 import { collectMeasurements, type SessionMeta } from "../../src/harvest"
 import { type HistoryRepository } from "../../src/history/durable"
 import { signatureFor } from "../../src/history/records"
-import { RECENT_CATCHUP_MS, type ViewState } from "../../src/history/service"
+import {
+  ACQUISITION_RETRY_DELAYS_MS,
+  INVENTORY_MIN_INTERVAL_MS,
+  RECENT_CATCHUP_MS,
+  type ViewState,
+} from "../../src/history/service"
 import { comparisonRows } from "../../src/stats"
 import {
   createClock,
@@ -19,6 +24,9 @@ import {
   tokens,
   unmeasured,
 } from "./harness"
+
+/** One failed operation spans three attempts: the first immediately, then after one and three seconds. */
+const retryWindowMs = ACQUISITION_RETRY_DELAYS_MS.reduce((total, wait) => total + wait, 0)
 
 describe("history service acquisition", () => {
   test("cold history publishes partial results progressively, newest first", async () => {
@@ -122,14 +130,14 @@ describe("history service acquisition", () => {
     })
 
     // Past the inventory interval a full listing runs again, still without rescanning settled sessions.
-    clock.setNow(NOW + 11 * 60_000)
+    clock.setNow(NOW + INVENTORY_MIN_INTERVAL_MS + 1)
     service.refreshNow()
     await clock.settle()
 
     expect(client.messageCalls).toHaveLength(3)
     expect(repository.readCoverage("/work/a")).toMatchObject({
-      fullInventoryCompletedAt: NOW + 11 * 60_000,
-      recentCatchUpAt: NOW + 11 * 60_000,
+      fullInventoryCompletedAt: NOW + INVENTORY_MIN_INTERVAL_MS + 1,
+      recentCatchUpAt: NOW + INVENTORY_MIN_INTERVAL_MS + 1,
     })
     release()
   })
@@ -472,6 +480,9 @@ describe("history service acquisition", () => {
     client.failListing = true
     service.refreshNow()
     await clock.settle()
+    // A first failure is not yet a reported failure: the operation still has attempts left.
+    expect(view().refreshFailed).toBe(false)
+    await clock.advance(retryWindowMs)
 
     expect(view()).toMatchObject({
       kind: "error",
@@ -491,7 +502,8 @@ describe("history service acquisition", () => {
     expect(view().kind).toBe("ready")
     expect(view().refreshFailed).toBe(false)
     expect(view().refreshing).toBe(false)
-    expect(view().lastCheckedAt).toBe(clock.now())
+    // The recovered pass is the catch-up tick that came due while the failure was outstanding.
+    expect(view().lastCheckedAt).toBe(NOW + RECENT_CATCHUP_MS)
     release()
 
     // A first pass that never succeeds is an error, not an empty result.
@@ -501,7 +513,7 @@ describe("history service acquisition", () => {
     const failing = createService(failingClient, createStore(), coldClock)
     const failingRelease = failing.hold()
     const failingView = failing.view({ directory: "/work/a", range: "last30" })
-    await coldClock.settle()
+    await coldClock.advance(retryWindowMs)
 
     expect(failingView()).toMatchObject({
       kind: "error",
@@ -531,9 +543,9 @@ describe("history service acquisition", () => {
     })
 
     client.failListing = true
-    clock.setNow(NOW + RECENT_CATCHUP_MS)
     service.refreshNow()
     await clock.settle()
+    await clock.advance(retryWindowMs)
 
     // The failed catch-up reported the error but never claimed new coverage.
     expect(view().refreshFailed).toBe(true)

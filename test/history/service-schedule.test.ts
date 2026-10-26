@@ -13,6 +13,7 @@ import {
   createClock,
   createDeferred,
   createEventSource,
+  createLog,
   createService,
   createStore,
   FakeClient,
@@ -266,7 +267,8 @@ describe("history service scheduling", () => {
     ]
     const clock = createClock(NOW)
     const repository = createStore()
-    const service = createService(client, repository, clock)
+    const { events, log } = createLog()
+    const service = createService(client, repository, clock, { log })
     const release = service.hold()
     const view = service.view({ directory: "/work/a", range: "all" })
     await clock.settle()
@@ -279,6 +281,13 @@ describe("history service scheduling", () => {
     service.refreshNow()
     await clock.settle()
 
+    // The inventory is inside its first retry wait here, so the invariant is a mid-retry one and no
+    // failure has been reported yet.
+    expect(events.filter((event) => event.operation === "inventory").at(-1)).toMatchObject({
+      outcome: "retry",
+      attempt: 1,
+    })
+    expect(view().refreshFailed).toBe(false)
     expect(view().scanned).toBe(2)
     expect(view().samples).toHaveLength(2)
     expect(storedRecords(repository).map((record) => record.sessionID).sort()).toEqual(["ses_a", "ses_b"])
