@@ -9,6 +9,7 @@ import {
 } from "../../src/history/service"
 import {
   createClock,
+  createDeferred,
   createEventSource,
   createLog,
   createService,
@@ -144,6 +145,12 @@ describe("history service diagnostics", () => {
     expect(view().kind).toBe("ready")
     expect(view().refreshFailed).toBe(false)
     expect(client.sessionCalls).toHaveLength(3)
+    // The success reports the whole operation, retry waits included, while `attempt` stays 3.
+    expect(events.filter((event) => event.operation === "inventory").at(-1)).toMatchObject({
+      outcome: "success",
+      attempt: 3,
+      durationMs: retryWindowMs,
+    })
     release()
   })
 
@@ -169,7 +176,8 @@ describe("history service diagnostics", () => {
     expect(events.filter((event) => event.operation === "inventory").at(-1)).toMatchObject({
       sessionsRead: 0,
       messagesRead: 0,
-      durationMs: 0,
+      // The operation-wide duration covers both waits and all three attempts.
+      durationMs: retryWindowMs,
     })
     expect(client.sessionCalls).toHaveLength(3)
     // Task 2 maps this internal error to the settled empty state, so it must stay observable here.
@@ -231,6 +239,105 @@ describe("history service diagnostics", () => {
     release()
   })
 
+  test("releasing the last consumer during a drain cancels the pass instead of reporting success", async () => {
+    const client = new FakeClient()
+    client.sessions = [
+      fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)]),
+      fixture("ses_b", NOW - 2_000, [measured(NOW - 2_500)]),
+      fixture("ses_c", NOW - 3_000, [measured(NOW - 3_500)]),
+    ]
+    const clock = createClock(NOW)
+    const repository = createStore()
+    const { events, log } = createLog()
+    const service = createService(client, repository, clock, { log, concurrency: 2 })
+    // Two workers of a multi-session pass are mid-scan when the last consumer goes away.
+    const scan = createDeferred()
+    client.scanDelay = () => scan.promise
+    const release = service.hold()
+    const view = service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    expect(client.inFlight).toBe(2)
+
+    release()
+    scan.resolve()
+    await clock.settle()
+
+    // Abandoned work is a cancellation, not a successful inventory of a partial cache.
+    expect(operations(events, "inventory")).toEqual([["cancelled", 1]])
+    expect(repository.readCoverage("/work/a")).toBeUndefined()
+    expect(view().kind).not.toBe("ready")
+    expect(clock.pending()).toBe(0)
+  })
+
+  test("a release landing as the retry wait fires does not restart acquisition", async () => {
+    const client = new FakeClient()
+    client.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
+    client.listingFailures = 1
+    const clock = createClock(NOW)
+    const { events, log } = createLog()
+    let release = () => {}
+    const service = createService(client, createStore(), clock, {
+      log,
+      // The wait resolves and the last consumer is released before the pass can resume.
+      delay: (callback, ms) =>
+        clock.delay(() => {
+          callback()
+          release()
+        }, ms),
+    })
+    release = service.hold()
+    service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    expect(operations(events, "inventory")).toEqual([["retry", 1]])
+
+    await clock.advance(ACQUISITION_RETRY_DELAYS_MS[0])
+
+    expect(operations(events, "inventory")).toEqual([
+      ["retry", 1],
+      ["cancelled", 1],
+    ])
+    // The released pass never listed again and left no timer behind.
+    expect(client.sessionCalls).toHaveLength(1)
+    expect(clock.pending()).toBe(0)
+  })
+
+  test("a reset landing as the retry wait fires does not restart the stale pass", async () => {
+    const client = new FakeClient()
+    client.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
+    client.listingFailures = 1
+    const clock = createClock(NOW)
+    const { events, log } = createLog()
+    let interfered = false
+    const service = createService(client, createStore(), clock, {
+      log,
+      // The wait resolves and a reset takes over before the stale pass can resume.
+      delay: (callback, ms) =>
+        clock.delay(() => {
+          callback()
+          if (interfered || ms !== ACQUISITION_RETRY_DELAYS_MS[0]) return
+          interfered = true
+          void service.reset()
+        }, ms),
+    })
+    const release = service.hold()
+    const view = service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    expect(operations(events, "inventory")).toEqual([["retry", 1]])
+
+    await clock.advance(ACQUISITION_RETRY_DELAYS_MS[0])
+    await clock.settle()
+
+    expect(operations(events, "inventory")).toEqual([
+      ["retry", 1],
+      ["cancelled", 1],
+      ["success", 1],
+    ])
+    // Only the failed attempt and the reset's own pass listed; the stale pass never resumed.
+    expect(client.sessionCalls).toHaveLength(2)
+    expect(view().kind).toBe("ready")
+    release()
+  })
+
   test("event-driven and audit scans log their own operations", async () => {
     const client = new FakeClient()
     client.sessions = [fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)])]
@@ -252,6 +359,37 @@ describe("history service diagnostics", () => {
 
     await clock.advance(AUDIT_INTERVAL_MS)
     expect(operations(logged, "audit")).toEqual([["success", 1]])
+    release()
+  })
+
+  test("a slow audit rotation is not restarted by the next tick", async () => {
+    const client = new FakeClient()
+    client.sessions = [
+      fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500)]),
+      fixture("ses_b", NOW - 2_000, [measured(NOW - 2_500)]),
+    ]
+    const clock = createClock(NOW)
+    const { events, log } = createLog()
+    const service = createService(client, createStore(), clock, { log })
+    const release = service.hold()
+    service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+    const scanned = client.messageCalls.length
+    expect(scanned).toBe(2)
+
+    // The rotation blocks on its first session across the following tick.
+    const scan = createDeferred()
+    client.scanDelay = () => scan.promise
+    await clock.advance(AUDIT_INTERVAL_MS)
+    expect(client.messageCalls).toHaveLength(scanned + 1)
+    await clock.advance(AUDIT_INTERVAL_MS)
+    expect(client.messageCalls).toHaveLength(scanned + 1)
+
+    client.scanDelay = undefined
+    scan.resolve()
+    await clock.settle()
+    // The rotation finishes both sessions exactly once.
+    expect(operations(events, "audit")).toHaveLength(2)
     release()
   })
 
@@ -389,6 +527,41 @@ describe("history service diagnostics", () => {
     expect(view().kind).toBe("error")
     expect(view().refreshFailed).toBe(true)
     expect(view().samples).toHaveLength(1)
+    release()
+  })
+
+  test("a mid-pass failure settles its drain workers before the retry starts", async () => {
+    const client = new FakeClient()
+    client.sessions = ["ses_a", "ses_b", "ses_c", "ses_d", "ses_e"].map((id, index) =>
+      fixture(id, NOW - (index + 1) * 1_000, [measured(NOW - (index + 1) * 1_000 - 500)]),
+    )
+    client.scanErrors.add("ses_b")
+    const clock = createClock(NOW)
+    const { events, log } = createLog()
+    const service = createService(client, createStore(), clock, { log, concurrency: 2 })
+    const scan = createDeferred()
+    client.scanDelay = () => scan.promise
+    const release = service.hold()
+    service.view({ directory: "/work/a", range: "all" })
+    await clock.settle()
+
+    // ses_b failed while the other worker is still scanning ses_a, so the attempt is not over yet.
+    expect(client.inFlight).toBe(1)
+    expect(operations(events, "inventory")).toEqual([])
+
+    client.scanErrors.clear()
+    scan.resolve()
+    await clock.settle()
+    expect(operations(events, "inventory")).toEqual([["retry", 1]])
+
+    await clock.advance(ACQUISITION_RETRY_DELAYS_MS[0])
+
+    expect(operations(events, "inventory")).toEqual([
+      ["retry", 1],
+      ["success", 2],
+    ])
+    // The retry never overlapped a worker left running by the failed attempt.
+    expect(client.maxInFlight).toBeLessThanOrEqual(2)
     release()
   })
 })

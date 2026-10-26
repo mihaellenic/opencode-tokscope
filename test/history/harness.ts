@@ -93,6 +93,8 @@ export class FakeClient implements HarvestClient {
   messageCalls: Parameters<HarvestClient["message"]["list"]>[0][] = []
   /** Session ids whose metadata read fails for a reason other than not-found. */
   getErrors = new Set<string>()
+  /** Session ids whose message read fails for a reason other than a vanished session. */
+  scanErrors = new Set<string>()
   listingDelay: (() => Promise<void>) | undefined
   scanDelay: (() => Promise<void>) | undefined
   /** Called once per message page read, before the page resolves. */
@@ -145,6 +147,7 @@ export class FakeClient implements HarvestClient {
       const entry = this.fixture(input.sessionID)
       if (entry === undefined) throw new Error(`unknown session: ${input.sessionID}`)
       this.onScan?.(input)
+      if (this.scanErrors.has(input.sessionID)) throw new Error("message read failed")
       this.inFlight++
       this.maxInFlight = Math.max(this.maxInFlight, this.inFlight)
       try {
@@ -268,6 +271,8 @@ export function createService(
     concurrency?: number
     subscribeEvents?: (handler: (event: { type: string; data?: { sessionID?: string } }) => void) => () => void
     log?: (event: HistoryLogEvent) => void
+    /** Overrides the clock's one-shot scheduler to inject interference inside a pending delay. */
+    delay?: (callback: () => void, ms: number) => () => void
   } = {},
 ): HistoryService {
   return createHistoryService({
@@ -275,7 +280,7 @@ export function createService(
     repository,
     subscribeEvents: options.subscribeEvents ?? (() => () => {}),
     setTimer: clock.setTimer,
-    delay: clock.delay,
+    delay: options.delay ?? clock.delay,
     now: clock.now,
     ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
     ...(options.log === undefined ? {} : { log: options.log }),

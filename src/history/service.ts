@@ -67,9 +67,11 @@ const DIRTY_EVENT_TYPES: ReadonlySet<string> = new Set([
 const DELETED_EVENT_TYPE = "session.deleted"
 
 /**
- * One structured diagnostic for background history work. Counters are records actually returned by the
- * client (including the retries of one operation), never API page counts, and never carry message
- * contents, credentials, session identifiers, or project paths.
+ * One structured diagnostic for background history work. `durationMs` covers the whole operation —
+ * every attempt plus the waits between them — while `attempt` still counts the attempts themselves.
+ * Counters are records actually returned by the client over that same span (including the retries of
+ * one operation), never API page counts, and never carry message contents, credentials, session
+ * identifiers, or project paths.
  */
 export interface HistoryLogEvent {
   operation: "hydrate" | "event" | "catch-up" | "inventory" | "audit" | "persistence"
@@ -83,7 +85,10 @@ export interface HistoryLogEvent {
 /** Operations that read through the client and therefore retry and count records. */
 type AcquisitionOperation = "event" | "catch-up" | "inventory" | "audit"
 
-/** Result of an acquisition a reset or teardown overtook: the operation must drop everything it got. */
+/**
+ * Result of an acquisition a reset or teardown overtook: the operation must drop everything it got.
+ * An attempt returns it as well when the work it was doing was abandoned mid-flight.
+ */
 const CANCELLED = Symbol("cancelled")
 
 export interface ViewState {
@@ -282,6 +287,7 @@ export function createHistoryService(deps: {
   let burstCancel: (() => void) | undefined
   let burstStartedAt: number | undefined
   let flushInFlight: Promise<void> | undefined
+  let auditInFlight = false
   let resetGeneration = 0
   let pendingRecords: SessionRecord[] = []
   let persistence: "ok" | "unavailable" = "ok"
@@ -317,50 +323,56 @@ export function createHistoryService(deps: {
 
   /**
    * Runs one acquisition operation with at most three attempts. Each attempt reads through the same
-   * operation-local scope, so the counters accumulate the records every attempt returned. A failed
-   * attempt is logged and retried after the injected delay, but only while `guard` (reset/deletion
-   * generation) still holds and a consumer is watching; the final failure is thrown to the operation
-   * that owns the work, and `CANCELLED` means the operation must drop its result without reporting.
+   * operation-local scope, so the counters accumulate the records every attempt returned; the logged
+   * duration covers the whole operation, waits and earlier attempts included, while `attempt` still
+   * counts the attempts themselves. A failed attempt is logged and retried after the injected delay,
+   * but only while `guard` (reset/deletion generation) still holds and a consumer is watching; the
+   * final failure is thrown to the operation that owns the work. `CANCELLED` — returned by the attempt
+   * itself when it abandoned its work, or derived from either guard — means the operation must drop
+   * its result without reporting it as a success.
    */
   async function acquire<T>(
     operation: AcquisitionOperation,
     guard: () => boolean,
     watching: () => boolean,
-    attempt: (scope: ReadScope) => Promise<T>,
+    attempt: (scope: ReadScope) => Promise<T | typeof CANCELLED>,
   ): Promise<T | typeof CANCELLED> {
     const scope = readScope(client)
-    const report = (outcome: HistoryLogEvent["outcome"], attemptNumber: number, startedAt: number): void =>
+    const operationStartedAt = now()
+    const report = (outcome: HistoryLogEvent["outcome"], attemptNumber: number): void =>
       emit({
         operation,
         outcome,
-        durationMs: now() - startedAt,
+        durationMs: now() - operationStartedAt,
         attempt: attemptNumber,
         sessionsRead: scope.sessionsRead,
         messagesRead: scope.messagesRead,
       })
     for (let attemptNumber = 1; ; attemptNumber++) {
-      const startedAt = now()
       try {
         const value = await attempt(scope)
-        if (!guard()) {
-          report("cancelled", attemptNumber, startedAt)
+        if (value === CANCELLED || !guard()) {
+          report("cancelled", attemptNumber)
           return CANCELLED
         }
-        report("success", attemptNumber, startedAt)
+        report("success", attemptNumber)
         return value
       } catch (error) {
         if (!guard()) {
-          report("cancelled", attemptNumber, startedAt)
+          report("cancelled", attemptNumber)
           return CANCELLED
         }
         const waitMs = ACQUISITION_RETRY_DELAYS_MS[attemptNumber - 1]
         if (waitMs === undefined || !watching()) {
-          report("failure", attemptNumber, startedAt)
+          report("failure", attemptNumber)
           throw error
         }
-        report("retry", attemptNumber, startedAt)
-        if (!(await waitForRetry(waitMs))) {
-          report("cancelled", attemptNumber, startedAt)
+        report("retry", attemptNumber)
+        const waited = await waitForRetry(waitMs)
+        // Re-checked once the wait is over: a release or reset that landed while it fired must not
+        // restart acquisition, or the pass would read the client again after a teardown.
+        if (!waited || !guard() || !watching()) {
+          report("cancelled", attemptNumber)
           return CANCELLED
         }
       }
@@ -435,7 +447,8 @@ export function createHistoryService(deps: {
         messagesRead: 0,
       })
     } catch {
-      // A cache that cannot be read leaves an empty in-memory cache; hydration is never retried.
+      // An unreadable shard stops hydration: the cache keeps the shards applied before it (possibly
+      // partial), and the failure is logged once here and never retried.
       emit({
         operation: "hydrate",
         outcome: "failure",
@@ -733,7 +746,12 @@ export function createHistoryService(deps: {
     status.publishedAt = now()
   }
 
-  /** Bounded worker pool over the listing order; stops taking new work once no consumer holds the service. */
+  /**
+   * Bounded worker pool over the listing order; stops taking new work once no consumer holds the
+   * service. A failed scan stops the other workers after the item they are on and is rethrown only
+   * once every worker has settled, so a retried attempt can never overlap leftover workers of the
+   * failed one or push the in-flight scans past `concurrency`.
+   */
   async function drain(
     scope: ReadScope,
     directory: string | undefined,
@@ -742,22 +760,31 @@ export function createHistoryService(deps: {
   ): Promise<boolean> {
     let cursor = 0
     let abandoned = false
+    let failed = false
     const worker = async (): Promise<void> => {
-      for (;;) {
-        if (holds === 0) {
-          abandoned = true
-          return
+      try {
+        for (;;) {
+          if (holds === 0) {
+            abandoned = true
+            return
+          }
+          if (failed) return
+          const position = cursor
+          cursor += 1
+          if (position >= items.length) return
+          const outcome = await scanSession(scope, items[position])
+          if (outcome?.requeue === true && outcome.meta !== undefined) onRequeue(outcome.meta)
+          await publishProgress(directory)
         }
-        const position = cursor
-        cursor += 1
-        if (position >= items.length) return
-        const outcome = await scanSession(scope, items[position])
-        if (outcome?.requeue === true && outcome.meta !== undefined) onRequeue(outcome.meta)
-        await publishProgress(directory)
+      } catch (error) {
+        failed = true
+        throw error
       }
     }
     const workers = Math.min(concurrency, Math.max(1, items.length))
-    await Promise.all(Array.from({ length: workers }, () => worker()))
+    const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()))
+    const rejection = settled.find((result) => result.status === "rejected")
+    if (rejection?.status === "rejected") throw rejection.reason
     return abandoned
   }
 
@@ -1030,7 +1057,7 @@ export function createHistoryService(deps: {
         inventory ? "inventory" : "catch-up",
         () => generation === resetGeneration,
         () => holds > 0,
-        async (scope): Promise<"settled" | "superseded"> => {
+        async (scope): Promise<"settled" | typeof CANCELLED> => {
           const listing = await listSessions(
             scope.client,
             inventory || previous?.recentCatchUpAt === undefined
@@ -1038,7 +1065,7 @@ export function createHistoryService(deps: {
               : { directory, fromMs: previous.recentCatchUpAt },
           )
           // A reset superseded this pass: it owns the store and schedules the next pass itself.
-          if (generation !== resetGeneration) return "superseded"
+          if (generation !== resetGeneration) return CANCELLED
           rememberTombstones()
           const known: string[] = []
           if (inventory) {
@@ -1068,23 +1095,23 @@ export function createHistoryService(deps: {
           })
           if (abandoned) {
             cancelPublish(directory)
-            return "superseded"
+            return CANCELLED
           }
           const abandonedAgain = await drain(scope, directory, requeue, () => {})
           if (abandonedAgain) {
             cancelPublish(directory)
-            return "superseded"
+            return CANCELLED
           }
-          if (generation !== resetGeneration) return "superseded"
+          if (generation !== resetGeneration) return CANCELLED
 
           await flushRecords()
-          if (generation !== resetGeneration) return "superseded"
+          if (generation !== resetGeneration) return CANCELLED
           await commitCoverage(directory, startedAt, inventory, previous)
-          return generation === resetGeneration ? "settled" : "superseded"
+          return generation === resetGeneration ? "settled" : CANCELLED
         },
       )
       if (outcome !== "settled") {
-        // Cancelled or superseded: the cache belongs to whoever overtook this pass.
+        // Cancelled: a release or reset overtook the pass, so the cache belongs to whoever took over.
         status.refreshing = true
         return
       }
@@ -1139,9 +1166,16 @@ export function createHistoryService(deps: {
       for (const directory of requestedDirectories()) ensurePass(directory)
     }, RECENT_CATCHUP_MS)
     auditCancel = deps.setTimer(() => {
-      void runAudit().catch(() => {
-        // The audit reports per-session failures; it never throws at the timer.
-      })
+      // Retries can stretch one rotation past its tick, so a slow batch is never started twice.
+      if (auditInFlight) return
+      auditInFlight = true
+      void runAudit()
+        .catch(() => {
+          // The audit reports per-session failures; it never throws at the timer.
+        })
+        .finally(() => {
+          auditInFlight = false
+        })
     }, AUDIT_INTERVAL_MS)
     // Marks that arrived while unattached are flushed now that a consumer is back.
     scheduleDirtyFlush()
