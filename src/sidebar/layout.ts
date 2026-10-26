@@ -5,8 +5,6 @@ export interface WidgetEntry {
 }
 
 export const NO_QUALIFYING_MESSAGE = "No models with 3+ calls in 24h."
-export const LOADING_MESSAGE = "Loading…"
-export const READ_ERROR_MESSAGE = "Could not read history."
 
 const UNIT = "tok/s"
 const SEPARATOR = " · "
@@ -16,16 +14,12 @@ function unitLine(width: number): string {
 }
 
 export const HEADING_BRAND = "TokScope"
+const HEADING_TITLE = `${HEADING_BRAND} · 24h`
 
-export function headingTitle(stale: boolean): string {
-  return stale ? `${HEADING_BRAND} · 24h (stale)` : `${HEADING_BRAND} · 24h`
-}
-
-export function headingLine(width: number, stale: boolean): string[] {
-  const title = headingTitle(stale)
-  const gap = width - title.length - UNIT.length
-  if (gap < 1) return [title, unitLine(width)]
-  return [title + " ".repeat(gap) + UNIT]
+export function headingLine(width: number): string[] {
+  const gap = width - HEADING_TITLE.length - UNIT.length
+  if (gap < 1) return [HEADING_TITLE, unitLine(width)]
+  return [HEADING_TITLE + " ".repeat(gap) + UNIT]
 }
 
 function abbreviate(provider: string, budget: number): string {

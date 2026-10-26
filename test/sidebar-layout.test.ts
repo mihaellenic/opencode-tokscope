@@ -1,26 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import {
-  entryLines,
-  headingLine,
-  LOADING_MESSAGE,
-  NO_QUALIFYING_MESSAGE,
-  READ_ERROR_MESSAGE,
-  type WidgetEntry,
-} from "../src/sidebar/layout"
+import { entryLines, headingLine, NO_QUALIFYING_MESSAGE, type WidgetEntry } from "../src/sidebar/layout"
 
 describe("headingLine", () => {
   test("reproduces the spec heading at 37 columns", () => {
-    expect(headingLine(37, false)).toEqual(["TokScope · 24h                  tok/s"])
-  })
-
-  test("keeps the unit aligned when marking rows stale", () => {
-    const lines = headingLine(37, true)
-    expect(lines).toHaveLength(1)
-    expect(lines[0]).toBe("TokScope · 24h (stale)          tok/s")
+    expect(headingLine(37)).toEqual(["TokScope · 24h                  tok/s"])
   })
 
   test("moves the unit to its own line at narrow widths", () => {
-    expect(headingLine(19, false)).toEqual(["TokScope · 24h", "              tok/s"])
+    expect(headingLine(19)).toEqual(["TokScope · 24h", "              tok/s"])
   })
 })
 
@@ -103,9 +90,7 @@ describe("entryLines", () => {
 })
 
 describe("state messages", () => {
-  test("state messages stay compact", () => {
-    for (const message of [NO_QUALIFYING_MESSAGE, LOADING_MESSAGE, READ_ERROR_MESSAGE]) {
-      expect(message.length).toBeLessThanOrEqual(37)
-    }
+  test("the empty message stays compact", () => {
+    expect(NO_QUALIFYING_MESSAGE.length).toBeLessThanOrEqual(37)
   })
 })
