@@ -342,7 +342,7 @@ describe("release PR validation workflow", () => {
   test("uploads the full acceptance evidence directory even when acceptance fails", () => {
     const validateJob = jobBlock(validate, "validate")
     const acceptance = validateJob.indexOf('release-acceptance.ts --output-dir "$ARTIFACT_DIR"')
-    const upload = validateJob.indexOf("actions/upload-artifact@v4")
+    const upload = validateJob.indexOf("actions/upload-artifact@v6")
     expect(upload).toBeGreaterThan(acceptance)
     const evidenceStep = validateJob.slice(
       validateJob.indexOf("Preserve acceptance evidence"),
@@ -356,6 +356,14 @@ describe("release PR validation workflow", () => {
     expect(evidenceStep).toContain("if-no-files-found: warn")
     expect(evidenceStep).toContain("retention-days: 14")
     expect(evidenceStep).not.toContain("continue-on-error")
+  })
+
+  test("uploads evidence with the native Node 24 artifact action in every workflow", () => {
+    for (const workflow of [release, validate]) {
+      expect(workflow.match(/actions\/upload-artifact@\S+/g)).toEqual([
+        "actions/upload-artifact@v6",
+      ])
+    }
   })
 
   test("preserves acceptance and audit failure summaries", () => {

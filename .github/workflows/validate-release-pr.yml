@@ -200,7 +200,7 @@ jobs:
 
       - name: Preserve acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-pr-evidence-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tokscope-release-pr
