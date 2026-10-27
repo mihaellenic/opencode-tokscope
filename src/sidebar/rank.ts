@@ -1,7 +1,6 @@
 import type { Sample } from "../metric"
 import { median, rowKey } from "../stats"
 
-export const WIDGET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const WIDGET_MIN_CALLS = 3
 export const WIDGET_MAX_ENTRIES = 3
 
@@ -14,12 +13,14 @@ export interface WidgetRow {
 }
 
 export function widgetRows(samples: readonly Sample[], nowMs: number): WidgetRow[] {
-  const since = nowMs - WIDGET_WINDOW_MS
+  const day = new Date(nowMs)
+  day.setHours(0, 0, 0, 0)
+  const midnight = day.getTime()
   type Group = { providerID: string; modelID: string; rates: number[] }
   const groups = new Map<string, Group>()
 
   for (const sample of samples) {
-    if (sample.completedAt <= since || sample.completedAt > nowMs) continue
+    if (sample.completedAt < midnight || sample.completedAt > nowMs) continue
     const key = rowKey(sample.providerID, sample.modelID)
     let group = groups.get(key)
     if (group === undefined) {

@@ -35,7 +35,7 @@ describe("widgetView", () => {
 
     expect(loading?.pending).toBe(true)
     expect(loading?.lines).toEqual([])
-    expect(loading?.heading).toEqual(["TokScope · 24h                  tok/s"])
+    expect(loading?.heading).toEqual(["TokScope · Today                tok/s"])
   })
 
   test("settled and failed empty views are the normal empty message, not a spinner", () => {
@@ -52,7 +52,7 @@ describe("widgetView", () => {
       const view = widgetView(state({ status, rows, stale: true }), 37, entries)
 
       expect(view?.pending).toBe(false)
-      expect(view?.heading).toEqual(["TokScope · 24h                  tok/s"])
+      expect(view?.heading).toEqual(["TokScope · Today                tok/s"])
       expect(view?.lines).toEqual([
         "DeepSeek V4.1 Flash · Ollama Cl…  133",
         "GLM 5.3 · Ollama Cloud            108",
@@ -64,6 +64,6 @@ describe("widgetView", () => {
   test("uses a later width for the heading and lines", () => {
     const view = widgetView(state({ status: "ready" }), 19, [])
 
-    expect(view?.heading).toEqual(["TokScope · 24h", "              tok/s"])
+    expect(view?.heading).toEqual(["TokScope · Today", "              tok/s"])
   })
 })

@@ -6,7 +6,7 @@
   Regenerate with `bun scripts/screenshots/generate.ts`, then render
   `tokscope-overview.html` at 1406 × 688 and save a viewport PNG.
 - `tokscope-sidebar.png`: a real capture of OpenCode 2.1.4 with the Tokscope
-  widget in the session sidebar (24h summary + one highlighted widget, as the
+  widget in the session sidebar (a 24h-era summary, captured before the sidebar switched to Today, + one highlighted widget, as the
   owner chose). It contains the owner's own session metadata, model names, and
   usage figures, reviewed before publishing.
 

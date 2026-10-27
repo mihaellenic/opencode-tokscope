@@ -35,7 +35,9 @@ const COVERAGE_INDEX_KEY = "tks.coverage-index"
 const TOMBSTONES_KEY = "tks.tombstones"
 const SNAPSHOTS_INDEX_KEY = "tks.snapshots"
 const VIEW_SNAPSHOT_PREFIX = "tks.snapshot.view."
-const WIDGET_SNAPSHOT_KEY = "tks.snapshot.widget24h"
+// The sidebar shows the local calendar day. The retired rolling-window key (`tks.snapshot.widget24h`)
+// is deliberately never read, written, or cleared: its rows must not be mistaken for today's.
+const WIDGET_SNAPSHOT_KEY = "tks.snapshot.widgetToday"
 
 /** FNV-1a, 32 bit: stable across runs, platforms, and processes; not a cryptographic hash. */
 export function fnv1a(value: string): number {

@@ -103,6 +103,18 @@ export interface ViewState {
   persistence: "ok" | "unavailable"
 }
 
+/** Local calendar midnight of `ms`; DST-safe because it uses calendar setters, not a 24h offset. */
+function localDayStart(ms: number): number {
+  const day = new Date(ms)
+  day.setHours(0, 0, 0, 0)
+  return day.getTime()
+}
+
+/** True when `savedAtMs` lies in the local day of `nowMs` and is not in the future. */
+function isWithinDay(savedAtMs: number, nowMs: number): boolean {
+  return savedAtMs >= localDayStart(nowMs) && savedAtMs <= nowMs
+}
+
 export interface WidgetSharedState {
   status: "loading" | "ready" | "error"
   rows: WidgetRow[]
@@ -295,7 +307,18 @@ export function createHistoryService(deps: {
   let hydrated = false
   const retryWaits = new Set<() => void>()
 
-  const storedWidget = deps.repository.readWidgetSnapshot()
+  // Start of the local day the published widget rows belong to; a different current start means
+  // the rows describe another day and must not be shown or retained.
+  let widgetDayStart = localDayStart(deps.now())
+  // Clock reading at the last rollover check or publication; a smaller reading means the clock
+  // moved backwards, so rows stamped after it are future-dated even within the same day.
+  let widgetClockMs = deps.now()
+  // Whether in-memory records may back an immediate projection: false after a reset until the
+  // next publication, because the records were just wiped and the re-acquisition has not landed.
+  let projectable = false
+  const storedSnapshot = deps.repository.readWidgetSnapshot()
+  const storedWidget =
+    storedSnapshot !== undefined && isWithinDay(storedSnapshot.savedAtMs, deps.now()) ? storedSnapshot : undefined
   const [widgetState, setWidgetState] = createSignal<WidgetSharedState>(
     storedWidget === undefined
       ? { status: "loading", rows: [], stale: false }
@@ -428,6 +451,7 @@ export function createHistoryService(deps: {
   function hydrateShards(): void {
     if (hydrated) return
     hydrated = true
+    projectable = true
     const startedAt = now()
     try {
       for (const shard of deps.repository.loadAllShards().values()) {
@@ -592,18 +616,44 @@ export function createHistoryService(deps: {
   function publishWidget(persist: boolean): void {
     const nowMs = now()
     const rows = widgetRows(allSamples(), nowMs)
+    widgetDayStart = localDayStart(nowMs)
+    widgetClockMs = nowMs
+    projectable = true
     widgetPublished = true
     setWidgetState({ status: "ready", rows, stale: false })
     if (persist) void persistWidget(rows, nowMs)
   }
 
   function publishWidgetFailure(): void {
+    // A failure never restores rows from a previous day.
+    rolloverWidget()
     const current = widgetState()
     setWidgetState(
       widgetPublished
         ? { status: "ready", rows: current.rows, stale: true }
         : { status: "error", rows: [], stale: false },
     )
+  }
+
+  /**
+   * Replaces rows that belong to an earlier (or, after a clock change, a later) local day. Hydrated
+   * records yield an immediate, stale current-day projection; otherwise the widget reverts to
+   * loading so nothing from the old day stays visible. Independent of acquisition progress.
+   */
+  function rolloverWidget(): void {
+    const nowMs = now()
+    const dayStart = localDayStart(nowMs)
+    const wentBack = nowMs < widgetClockMs
+    widgetClockMs = nowMs
+    if (dayStart === widgetDayStart && !wentBack) return
+    widgetDayStart = dayStart
+    if (projectable) {
+      widgetPublished = true
+      setWidgetState({ status: "ready", rows: widgetRows(allSamples(), nowMs), stale: true })
+    } else {
+      widgetPublished = false
+      setWidgetState({ status: "loading", rows: [], stale: false })
+    }
   }
 
   async function persistWidget(rows: WidgetRow[], nowMs: number): Promise<void> {
@@ -1161,8 +1211,11 @@ export function createHistoryService(deps: {
 
   function startTimers(): void {
     if (timerCancel !== undefined) return
+    // Reattachment: the day may have changed while no timer was running.
+    rolloverWidget()
     timerCancel = deps.setTimer(() => {
       if (holds === 0) return
+      rolloverWidget()
       for (const directory of requestedDirectories()) ensurePass(directory)
     }, RECENT_CATCHUP_MS)
     auditCancel = deps.setTimer(() => {
@@ -1246,7 +1299,13 @@ export function createHistoryService(deps: {
     tombstones.clear()
     coverage.clear()
     pendingRecords = []
+    // The store is about to be wiped: memory is now authoritative, so a first hydration after this
+    // point must never read the pre-clear shards nor mark the empty state projectable.
+    hydrated = true
     widgetPublished = false
+    projectable = false
+    widgetDayStart = localDayStart(now())
+    widgetClockMs = now()
     setWidgetState({ status: "loading", rows: [], stale: false })
     for (const status of statuses.values()) {
       status.refreshing = true
