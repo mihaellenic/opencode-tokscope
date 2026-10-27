@@ -4,7 +4,7 @@ export interface WidgetEntry {
   median: number
 }
 
-export const NO_QUALIFYING_MESSAGE = "No models with 3+ calls in 24h."
+export const NO_QUALIFYING_MESSAGE = "No models with 3+ calls today."
 
 const UNIT = "tok/s"
 const SEPARATOR = " · "
@@ -14,7 +14,7 @@ function unitLine(width: number): string {
 }
 
 export const HEADING_BRAND = "TokScope"
-const HEADING_TITLE = `${HEADING_BRAND} · 24h`
+const HEADING_TITLE = `${HEADING_BRAND} · Today`
 
 export function headingLine(width: number): string[] {
   const gap = width - HEADING_TITLE.length - UNIT.length

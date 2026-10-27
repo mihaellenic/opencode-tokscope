@@ -3,11 +3,11 @@ import { entryLines, headingLine, NO_QUALIFYING_MESSAGE, type WidgetEntry } from
 
 describe("headingLine", () => {
   test("reproduces the spec heading at 37 columns", () => {
-    expect(headingLine(37)).toEqual(["TokScope · 24h                  tok/s"])
+    expect(headingLine(37)).toEqual(["TokScope · Today                tok/s"])
   })
 
   test("moves the unit to its own line at narrow widths", () => {
-    expect(headingLine(19)).toEqual(["TokScope · 24h", "              tok/s"])
+    expect(headingLine(19)).toEqual(["TokScope · Today", "              tok/s"])
   })
 })
 

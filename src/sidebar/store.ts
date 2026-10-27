@@ -16,7 +16,7 @@ export interface WidgetStore {
 }
 
 /**
- * Sidebar adapter over the shared history service: the service owns acquisition, rolling-window
+ * Sidebar adapter over the shared history service: the service owns acquisition, calendar-day
  * expiry, and refresh coalescing, so the widget only mirrors its publication and holds it open.
  */
 export function createWidgetStore(service: HistoryService): WidgetStore {

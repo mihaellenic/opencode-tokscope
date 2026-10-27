@@ -423,10 +423,43 @@ describe("widget snapshot", () => {
       savedAtMs: NOW,
     })
 
-    await store.write("tks.snapshot.widget24h", (draft) => {
+    await store.write("tks.snapshot.widgetToday", (draft) => {
       draft.rows = "corrupt"
     })
     expect(repository.readWidgetSnapshot()).toBeUndefined()
+  })
+
+  test("uses a distinct key and never reads, writes, or clears the legacy 24h snapshot", async () => {
+    const store = createMemoryStore()
+    const repository = createRepository(store)
+    const legacy = {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      metricVersion: METRIC_VERSION,
+      rows: [{ key: "old/m", providerID: "old", modelID: "m", median: 9, calls: 5 }],
+      savedAtMs: NOW,
+    }
+    await store.write("tks.snapshot.widget24h", (draft) => {
+      Object.assign(draft, legacy)
+    })
+
+    expect(repository.readWidgetSnapshot()).toBeUndefined()
+
+    await repository.writeWidgetSnapshot(widgetRows, NOW + 1)
+    expect(store.read("tks.snapshot.widget24h")).toEqual(legacy)
+    expect(repository.readWidgetSnapshot()?.rows).toEqual(widgetRows)
+
+    await repository.clear()
+    expect(repository.readWidgetSnapshot()).toBeUndefined()
+    expect(store.read("tks.snapshot.widget24h")).toEqual(legacy)
+  })
+
+  test("writing a snapshot leaves ordinary history records intact", async () => {
+    const store = createMemoryStore()
+    const repository = createRepository(store)
+    await repository.putRecords([record("ses_alpha")], NOW)
+    await repository.writeWidgetSnapshot(widgetRows, NOW)
+
+    expect(storedSessionIDs(repository)).toEqual(["ses_alpha"])
   })
 })
 
@@ -477,3 +510,7 @@ describe("clear", () => {
     expect(store.dump().size).toBe(0)
   })
 })
+
+function storedSessionIDs(repository: ReturnType<typeof createRepository>): string[] {
+  return [...repository.loadAllShards().values()].flatMap((shard) => Object.keys(shard.records))
+}

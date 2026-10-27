@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import type { Sample } from "../src/metric"
-import { WIDGET_WINDOW_MS, widgetRows } from "../src/sidebar/rank"
+import { widgetRows } from "../src/sidebar/rank"
 
 const HOUR_MS = 60 * 60 * 1000
-const NOW = 1_000_000_000_000
+const NOW = new Date(2026, 5, 15, 12).getTime()
 
 const sample = (
   providerID: string,
@@ -24,14 +24,14 @@ const repeated = (
   Array.from({ length: count }, () => sample(providerID, modelID, rate, completedAt, variant))
 
 describe("widgetRows", () => {
-  test("qualifies only pairs with three measured calls inside the rolling window", () => {
+  test("qualifies only pairs with three measured calls today", () => {
     const rows = widgetRows(
       [
         ...repeated("a", "x", 40, 3, NOW - HOUR_MS),
         ...repeated("b", "x", 90, 2, NOW - HOUR_MS),
-        ...repeated("c", "x", 80, 3, NOW - 25 * HOUR_MS),
+        ...repeated("c", "x", 80, 3, NOW - 48 * HOUR_MS),
         ...repeated("d", "x", 70, 1, NOW - HOUR_MS),
-        ...repeated("d", "x", 70, 2, NOW - 25 * HOUR_MS),
+        ...repeated("d", "x", 70, 2, NOW - 48 * HOUR_MS),
       ],
       NOW,
     )
@@ -41,22 +41,58 @@ describe("widgetRows", () => {
     expect(rows[0].median).toBe(40)
   })
 
-  test("window boundary is strict and excludes the future", () => {
+  test("midnight belongs to today and the previous millisecond does not", () => {
+    const now = new Date(2026, 5, 15, 14, 30).getTime()
+    const midnight = new Date(2026, 5, 15).getTime()
     const rows = widgetRows(
       [
-        sample("edge", "x", 1_000, NOW - WIDGET_WINDOW_MS),
-        sample("edge", "x", 10, NOW - WIDGET_WINDOW_MS + 1),
-        sample("edge", "x", 20, NOW - WIDGET_WINDOW_MS + 1),
-        sample("edge", "x", 30, NOW - WIDGET_WINDOW_MS + 1),
-        sample("edge", "x", 2_000, NOW + 1),
+        sample("edge", "x", 1_000, midnight - 1),
+        sample("edge", "x", 10, midnight),
+        sample("edge", "x", 20, midnight),
+        sample("edge", "x", 30, midnight),
+        sample("edge", "x", 2_000, now + 1),
       ],
-      NOW,
+      now,
     )
 
     expect(rows).toHaveLength(1)
     expect(rows[0].calls).toBe(3)
     expect(rows[0].median).toBe(20)
   })
+
+  test("a call exactly at now is included", () => {
+    const now = new Date(2026, 5, 15, 14, 30).getTime()
+    expect(widgetRows(repeated("a", "x", 5, 3, now), now)).toHaveLength(1)
+  })
+
+  test("uses the calendar date rather than a rolling 24 hours", () => {
+    const now = new Date(2026, 5, 15, 1, 0).getTime()
+    // 23 hours ago is yesterday on the calendar, so it must not count.
+    const rows = widgetRows(repeated("a", "x", 50, 3, now - 23 * HOUR_MS), now)
+    expect(rows).toEqual([])
+  })
+
+  for (const [label, year, month, day] of [
+    ["spring-forward (23-hour day)", 2026, 2, 8],
+    ["fall-back (25-hour day)", 2026, 10, 1],
+  ] as const) {
+    test(`uses local calendar midnight on ${label}`, () => {
+      const midnight = new Date(year, month, day).getTime()
+      const now = new Date(year, month, day, 20, 15).getTime()
+      const rows = widgetRows(
+        [
+          ...repeated("before", "x", 99, 3, midnight - 1),
+          ...repeated("start", "x", 40, 3, midnight),
+          ...repeated("mid", "x", 30, 3, new Date(year, month, day, 12).getTime()),
+          ...repeated("now", "x", 20, 3, now),
+          ...repeated("future", "x", 10, 3, now + 1),
+        ],
+        now,
+      )
+
+      expect(rows.map((row) => row.key)).toEqual(["start/x", "mid/x", "now/x"])
+    })
+  }
 
   test("ranks by unrounded median", () => {
     const rows = widgetRows(
