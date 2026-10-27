@@ -18,7 +18,7 @@ You are Tokscope's focused coding subagent. Complete the delegated task with the
 
 ## Use the right plugin APIs
 
-- Load the OpenCode skill when working on OpenCode APIs or configuration. Consult official V2 documentation, especially https://opencode.ai/v2/docs/build/plugins/cli for this TUI plugin.
+- Consult official V2 documentation, especially https://opencode.ai/v2/docs/build/plugins/cli for this TUI plugin.
 - Check examples against installed package types and the project's pinned versions. Do not invent APIs, mix V1 and V2, confuse server plugins with TUI plugins, or upgrade dependencies just to fit newer examples.
 - Preserve Solid ownership and cleanup of subscriptions, timers, and effects. Handle asynchronous errors and stale responses without leaking resources or overwriting newer state.
 - Preserve the metric and filtering semantics documented in `README.md` unless the task explicitly changes them.
