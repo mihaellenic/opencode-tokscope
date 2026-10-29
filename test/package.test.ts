@@ -30,10 +30,17 @@ describe("package manifest", () => {
   test("declares host compatibility", () => {
     expect(manifest.dependencies["@opencode/plugin"]).toBe("2.1.2")
     expect(manifest.peerDependencies).toEqual({
-      "@opentui/core": "^0.6.6",
-      "@opentui/solid": "^0.6.6",
-      "solid-js": "^1.9.12",
+      "@opentui/core": "^0.8.0",
+      "@opentui/solid": "^0.8.0",
+      "solid-js": "^1.9.17",
     })
+  })
+
+  test("pins matching OpenTUI dev dependencies and patched Solid", () => {
+    for (const name of ["@opentui/core", "@opentui/keymap", "@opentui/solid"]) {
+      expect(manifest.devDependencies[name]).toBe("0.8.0")
+    }
+    expect(manifest.devDependencies["solid-js"]).toBe("1.9.17")
   })
 
   test("keeps the released version in step with release-please", () => {
