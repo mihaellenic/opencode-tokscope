@@ -34,13 +34,6 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  SEROVAL_AUDIT_EXCEPTION,
-  auditExceptionDecision,
-  auditExceptionEvidence,
-  readConsumerVersions,
-  type AuditExceptionDecision,
-} from "./audit-exception"
 
 /** The only paths the published tarball may contain (docs/releasing.md §3). */
 export const ALLOWED_ARTIFACT_FILES = [
@@ -461,6 +454,11 @@ export function summarizeAudit(stdout: string): AuditSummary {
   return { entries, counts, high: counts.high, critical: counts.critical }
 }
 
+/** Strict gate: any high or critical entry blocks release; there are no waivers. */
+export function auditBlockers(summary: AuditSummary): string | undefined {
+  return summary.high > 0 || summary.critical > 0 ? describeBlockingAudit(summary) : undefined
+}
+
 function describeBlockingAudit(summary: AuditSummary): string {
   const blocking = summary.entries.filter((entry) => entry.severity === "high" || entry.severity === "critical")
   const lines = blocking.map((entry) => {
@@ -786,9 +784,7 @@ function runAcceptance(options: Extract<AcceptanceOptions, { mode: "accept" }>):
     pass("consumer-install", `${name}@${version} installed with --omit=dev --ignore-scripts`)
 
     // 11. Advisory audit of the production consumer. Malformed output, network
-    // errors, and every untriaged high/critical finding fail closed. After the
-    // complete report is validated, one checked and expiry-bound exception may
-    // cover only the exact seroval advisories on the pinned assessed chain.
+    // errors, and every high/critical finding fail closed; there are no waivers.
     const audit = exec(["npm", "audit", "--omit=dev", "--json"], consumer)
     const auditJsonPath = join(outputDir, "npm-audit-omit-dev.json")
     writeFileSync(auditJsonPath, audit.stdout)
@@ -810,52 +806,9 @@ function runAcceptance(options: Extract<AcceptanceOptions, { mode: "accept" }>):
         `npm audit output is not usable: ${reason}\nstdout (tail):\n${tail(audit.stdout)}\nstderr (tail):\n${tail(audit.stderr)}`,
       )
     }
-    let exceptionDecision: Extract<AuditExceptionDecision, { allowed: true }> | undefined
-    let exceptionEvidencePath: string | undefined
-    if (summary.high > 0 || summary.critical > 0) {
-      const now = new Date()
-      let versions: Map<string, string>
-      let decision: AuditExceptionDecision
-      try {
-        versions = readConsumerVersions(consumer, [
-          name,
-          ...Object.keys(SEROVAL_AUDIT_EXCEPTION.versions),
-        ])
-        decision = auditExceptionDecision({
-          report: parseAuditJson(audit.stdout),
-          root: { name, version },
-          versions,
-          now,
-        })
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        throw new AcceptanceFailure(
-          "consumer-audit",
-          `audit exception could not be evaluated: ${reason}\nEvidence: ${auditJsonPath}`,
-        )
-      }
-      if (!decision.allowed) {
-        throw new AcceptanceFailure(
-          "consumer-audit",
-          `${describeBlockingAudit(summary)}\nAudit exception refused: ${decision.detail}\nEvidence: ${auditJsonPath}`,
-        )
-      }
-      exceptionDecision = decision
-      exceptionEvidencePath = join(outputDir, "accepted-audit-exceptions.json")
-      writeFileSync(
-        exceptionEvidencePath,
-        `${JSON.stringify(auditExceptionEvidence(decision, versions, now), null, 2)}\n`,
-      )
-      warn(
-        `scoped audit exception ${SEROVAL_AUDIT_EXCEPTION.id} applied; NOT a clean audit; expires ${SEROVAL_AUDIT_EXCEPTION.expiresAt} (exclusive); evidence ${exceptionEvidencePath}`,
-      )
-      pass(
-        "consumer-audit",
-        `${decision.detail}; NOT a clean audit (${jsonSummary(summary.counts)}; evidence ${exceptionEvidencePath})`,
-      )
-    } else {
-      pass("consumer-audit", `no high/critical advisories (${jsonSummary(summary.counts)})`)
-    }
+    const blockers = auditBlockers(summary)
+    if (blockers) throw new AcceptanceFailure("consumer-audit", `${blockers}\nEvidence: ${auditJsonPath}`)
+    pass("consumer-audit", `no high/critical advisories (${jsonSummary(summary.counts)})`)
 
     // 12. Preserve exactly the validated tarball plus machine-readable metadata.
     const metadata = preserveArtifact({
@@ -877,16 +830,7 @@ function runAcceptance(options: Extract<AcceptanceOptions, { mode: "accept" }>):
     console.log(`  shasum:    ${metadata.shasum}`)
     console.log(`  integrity: ${metadata.integrity}`)
     console.log(`  sha256:    ${metadata.sha256}`)
-    console.log(
-      `  audit:     ${jsonSummary(summary.counts)}${
-        exceptionDecision ? " (scoped exception applied; NOT a clean audit)" : ""
-      } (evidence ${auditJsonPath})`,
-    )
-    if (exceptionDecision && exceptionEvidencePath) {
-      console.log(
-        `  exception: ${SEROVAL_AUDIT_EXCEPTION.id}, expires ${SEROVAL_AUDIT_EXCEPTION.expiresAt} (evidence ${exceptionEvidencePath})`,
-      )
-    }
+    console.log(`  audit:     ${jsonSummary(summary.counts)} (evidence ${auditJsonPath})`)
     if (warnings.length > 0) {
       console.log(`  warnings (${warnings.length}):`)
       for (const warning of warnings) console.log(`    - ${warning}`)

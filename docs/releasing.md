@@ -83,13 +83,13 @@ validation and publication. It:
   disabled, then audits that consumer's resolved dependencies, not the repository.
 - Preserves the accepted tarball and its hashes in `artifact.json`.
 
-High/critical advisories block acceptance unless covered by an explicit,
-owner-authorized, issue-linked, unexpired exception in
-[scripts/audit-exception.ts](../scripts/audit-exception.ts). Exceptions match exact
-advisories, dependency versions, and assessed paths; they are not blanket waivers.
-See that file and its linked issue for active exceptions and deadlines rather than
-copying temporary findings here. Audit errors and malformed reports fail closed.
-An applied exception is **not a clean audit**.
+High/critical advisories block acceptance with no waiver. The seroval advisories
+GHSA-p6vx-979v-rg4c and GHSA-jp82-f5mq-hwhp were remediated by requiring
+`@opentui/solid` and `@opentui/core` `^0.8.0` and `solid-js` `^1.9.17`, so a fresh
+consumer resolves a patched `seroval`; the former scoped exception was retired. Any
+future waiver would need a new owner-authorized, issue-linked, unexpired exception
+added in code and documented here, and it would be not a clean audit. Audit errors
+and malformed reports fail closed.
 
 Do not bypass peer resolution with `--force` or `--legacy-peer-deps`, or suppress
 engine/deprecation warnings to get a green release. Triage security findings and
@@ -106,8 +106,7 @@ failure may produce no artifact. Artifacts have a 14-day retention:
 - Publish: `release-evidence-<tag>`.
 
 Depending on how far acceptance got, evidence contains the tarball, `artifact.json`,
-raw `npm-audit-omit-dev.json` and optional stderr, and optional
-`accepted-audit-exceptions.json`. PR validation also records `head-status.json`
+raw `npm-audit-omit-dev.json` and optional stderr. PR validation also records `head-status.json`
 when the freshness step runs. The human-readable summary is in the workflow run,
 not the artifact directory. Identify evidence by run URL, attempt, and commit/tag,
 not artifact name alone. Preserve needed evidence with the release record before
