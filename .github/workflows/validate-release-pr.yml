@@ -245,10 +245,7 @@ jobs:
             fi
           fi
 
-          if [ -f "$ARTIFACT_DIR/accepted-audit-exceptions.json" ]; then
-            audit=exception-applied
-            audit_detail="scoped audit exception applied — NOT a clean audit; see accepted-audit-exceptions.json"
-          elif [ -f "$ARTIFACT_DIR/npm-audit-omit-dev.json" ]; then
+          if [ -f "$ARTIFACT_DIR/npm-audit-omit-dev.json" ]; then
             if jq -e '(.metadata.vulnerabilities.high | type) == "number" and (.metadata.vulnerabilities.critical | type) == "number"' \
               "$ARTIFACT_DIR/npm-audit-omit-dev.json" >/dev/null 2>&1; then
               high=$(jq -r '.metadata.vulnerabilities.high' "$ARTIFACT_DIR/npm-audit-omit-dev.json")
@@ -318,10 +315,6 @@ jobs:
             echo "- Evidence artifact: \`$EVIDENCE_ARTIFACT\`"
             echo ""
             echo "Acceptance covers the artifact only; it does not verify publication."
-            if [ "$audit" = "exception-applied" ]; then
-              echo ""
-              echo "**Audit exception applied — this is NOT a clean audit.**"
-            fi
             if [ "$head_outcome" = "not-run" ]; then
               echo ""
               echo "**Head freshness is not-run: do not treat this run as a successful validation.**"
@@ -348,10 +341,10 @@ jobs:
             echo "no accepted artifact evidence: $artifact" >&2
             exit 1
           fi
-          case "$audit" in
-            exception-applied|no-high-critical) ;;
-            *) echo "consumer audit is not acceptable: $audit" >&2; exit 1 ;;
-          esac
+          if [ "$audit" != "no-high-critical" ]; then
+            echo "consumer audit is not acceptable: $audit" >&2
+            exit 1
+          fi
           if [ "$freshness" != "success" ]; then
             echo "current PR head was not verified: $freshness" >&2
             exit 1

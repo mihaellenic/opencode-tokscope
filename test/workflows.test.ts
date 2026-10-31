@@ -388,7 +388,6 @@ describe("release PR validation workflow", () => {
       "Prerequisites for head",
       "preflight",
       "no accepted artifact was preserved",
-      "NOT a clean audit",
       "blocking high=",
       "audit=unverified",
       "Head freshness",
@@ -426,7 +425,9 @@ describe("release PR validation workflow", () => {
     expect(gate).toContain("ARTIFACT: ${{ steps.evidence.outputs.artifact || 'unavailable' }}")
     expect(gate).toContain("AUDIT: ${{ steps.evidence.outputs.audit || 'unverified' }}")
     expect(gate).toContain("FRESHNESS: ${{ steps.freshness.outcome || 'not-run' }}")
-    expect(gate).toContain("exception-applied|no-high-critical")
+    expect(gate).toContain('"$audit" != "no-high-critical"')
+    expect(gate).not.toContain("exception-applied")
+    expect(validateJob).not.toContain("accepted-audit-exceptions")
     expect(gate).toContain('"$acceptance" != "success"')
     expect(gate).toContain('"$artifact" != "accepted"')
     expect(gate).toContain('"$freshness" != "success"')
@@ -496,7 +497,6 @@ describe("release PR validation workflow", () => {
     expect(docs).toContain("not the artifact directory")
     expect(docs).toContain("`artifact.json`")
     expect(docs).toContain("`npm-audit-omit-dev.json`")
-    expect(docs).toContain("`accepted-audit-exceptions.json`")
     expect(docs).toContain("`head-status.json`")
     expect(docs).not.toContain("raw audit, acceptance summary, and `head-status.json`")
   })

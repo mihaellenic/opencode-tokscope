@@ -37,15 +37,15 @@
     "@opencode/plugin": "2.1.2"
   },
   "peerDependencies": {
-    "@opentui/core": "^0.6.6",
-    "@opentui/solid": "^0.6.6",
-    "solid-js": "^1.9.12"
+    "@opentui/core": "^0.8.0",
+    "@opentui/solid": "^0.8.0",
+    "solid-js": "^1.9.17"
   },
   "devDependencies": {
     "@opencode/client": "2.1.2",
-    "@opentui/core": "0.6.6",
-    "@opentui/keymap": "0.6.6",
-    "@opentui/solid": "0.6.6",
+    "@opentui/core": "0.8.0",
+    "@opentui/keymap": "0.8.0",
+    "@opentui/solid": "0.8.0",
     "solid-js": "1.9.17",
     "typescript": "5.7.3",
     "@types/bun": "1.4.0"

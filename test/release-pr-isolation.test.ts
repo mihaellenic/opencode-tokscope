@@ -357,9 +357,9 @@ describe("accepted evidence gate", () => {
     expect(run.exitCode).toBe(0)
   })
 
-  test("accepts an exact package with a scoped audit exception and a current head", () => {
+  test("rejects the retired exception-applied audit outcome", () => {
     const run = runStep(evidence, { env: gateEnv({ AUDIT: "exception-applied" }) })
-    expect(run.exitCode).toBe(0)
+    expect(run.exitCode).not.toBe(0)
   })
 
   const rejected: Array<{ name: string; env: Record<string, string | undefined> }> = [
@@ -501,19 +501,28 @@ describe("validation and acceptance summary", () => {
     expect(run.summary).not.toContain("publish verified")
   })
 
-  test("keeps blocking audit values and the scoped-exception warning distinct", () => {
+  test("keeps blocking audit values and ignores a fake exception file", () => {
+    const blockingAudit = JSON.stringify({ metadata: { vulnerabilities: { high: 1, critical: 2 } } })
     const blocking = runStep(summaryStep, {
       env: summaryEnv({ ACCEPTANCE: "failure", FRESHNESS: "not-run" }),
-      artifactFiles: {
-        "npm-audit-omit-dev.json": JSON.stringify({
-          metadata: { vulnerabilities: { high: 1, critical: 2 } },
-        }),
-      },
+      artifactFiles: { "npm-audit-omit-dev.json": blockingAudit },
     })
     expect(outputs(blocking).audit).toBe("blocking")
     expect(blocking.summary).toContain("blocking high=1 critical=2")
 
-    const exception = runStep(summaryStep, {
+    const faked = runStep(summaryStep, {
+      env: summaryEnv({ FRESHNESS: "not-run" }),
+      artifactFiles: {
+        "artifact.json": artifactJson,
+        "npm-audit-omit-dev.json": blockingAudit,
+        "accepted-audit-exceptions.json": "{}",
+        "head-status.json": headStatusFile(),
+      },
+    })
+    expect(outputs(faked).audit).toBe("blocking")
+    expect(faked.summary).not.toContain("exception")
+
+    const fakeOnly = runStep(summaryStep, {
       env: summaryEnv({ FRESHNESS: "not-run" }),
       artifactFiles: {
         "artifact.json": artifactJson,
@@ -521,7 +530,6 @@ describe("validation and acceptance summary", () => {
         "head-status.json": headStatusFile(),
       },
     })
-    expect(outputs(exception).audit).toBe("exception-applied")
-    expect(exception.summary).toContain("NOT a clean audit")
+    expect(outputs(fakeOnly).audit).toBe("not-run")
   })
 })
