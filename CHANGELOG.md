@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* require patched seroval runtime chain (OpenTUI 0.8.x, Solid 1.9.17)
+
+### Features
+
+* show today's metrics in the sidebar ([a760ad0](https://github.com/mihaellenic/opencode-tokscope/commit/a760ad0a3ba49e93cf1e63685e4a1f41d3ef7e05))
+* show today's metrics in the sidebar ([3c20800](https://github.com/mihaellenic/opencode-tokscope/commit/3c20800adc35e7f553d244de2b27eb915f9e768b))
+
+
+### Bug Fixes
+
+* require patched seroval runtime chain (OpenTUI 0.8.x, Solid 1.9.17) ([164d1a7](https://github.com/mihaellenic/opencode-tokscope/commit/164d1a70b02c502b823e9e5a36cc8169c6874ad7))
+
 ## [0.3.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.2.0...v0.3.0) (2026-10-26)
 
 
