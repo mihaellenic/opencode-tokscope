@@ -27,16 +27,20 @@ describe("package manifest", () => {
     expect(rootEntrypoint).toBe('export { default } from "./dist/tui.js"')
   })
 
-  test("declares host compatibility", () => {
-    expect(manifest.dependencies["@opencode/plugin"]).toBe("2.1.2")
+  test("declares host compatibility without installing a second runtime", () => {
+    expect(manifest.dependencies ?? {}).toEqual({})
     expect(manifest.peerDependencies).toEqual({
       "@opentui/core": "^0.8.0",
       "@opentui/solid": "^0.8.0",
       "solid-js": "^1.9.17",
     })
+    for (const name of Object.keys(manifest.peerDependencies)) {
+      expect(manifest.peerDependenciesMeta[name]).toEqual({ optional: true })
+    }
   })
 
-  test("pins matching OpenTUI dev dependencies and patched Solid", () => {
+  test("pins the development SDK, OpenTUI, and Solid", () => {
+    expect(manifest.devDependencies["@opencode/plugin"]).toBe("2.1.2")
     for (const name of ["@opentui/core", "@opentui/keymap", "@opentui/solid"]) {
       expect(manifest.devDependencies[name]).toBe("0.8.0")
     }

@@ -33,21 +33,28 @@
     "setup": "git config core.hooksPath githooks",
     "prepack": "bun run build"
   },
-  "dependencies": {
-    "@opencode/plugin": "2.1.2"
-  },
   "peerDependencies": {
     "@opentui/core": "^0.8.0",
     "@opentui/solid": "^0.8.0",
     "solid-js": "^1.9.17"
   },
+  "peerDependenciesMeta": {
+    "@opentui/core": { "optional": true },
+    "@opentui/solid": { "optional": true },
+    "solid-js": { "optional": true }
+  },
   "devDependencies": {
     "@opencode/client": "2.1.2",
+    "@opencode/plugin": "2.1.2",
     "@opentui/core": "0.8.0",
     "@opentui/keymap": "0.8.0",
     "@opentui/solid": "0.8.0",
     "solid-js": "1.9.17",
     "typescript": "5.7.3",
     "@types/bun": "1.4.0"
+  },
+  "overrides": {
+    "glob": "14.0.6",
+    "minimatch": "11.0.9"
   }
 }

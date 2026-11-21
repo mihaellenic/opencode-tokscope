@@ -91,6 +91,12 @@ future waiver would need a new owner-authorized, issue-linked, unexpired excepti
 added in code and documented here, and it would be not a clean audit. Audit errors
 and malformed reports fail closed.
 
+The SDK is a development dependency; OpenTUI and Solid are optional npm peers.
+OpenCode provides all three at runtime, so a production install should not pull in
+another copy. Run `bun audit` separately to check the checkout's development tree;
+the `glob` and `minimatch` overrides there do not apply to consumers or to OpenCode
+itself (see [#24](https://github.com/mihaellenic/opencode-tokscope/issues/24)).
+
 Do not bypass peer resolution with `--force` or `--legacy-peer-deps`, or suppress
 engine/deprecation warnings to get a green release. Triage security findings and
 deprecation notices; unresolved findings block release unless explicitly covered
