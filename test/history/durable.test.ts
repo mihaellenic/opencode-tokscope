@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import type { WidgetRow } from "../../src/sidebar/rank"
+import { modelRows } from "../../src/stats"
 import {
   CACHE_SCHEMA_VERSION,
   METRIC_VERSION,
+  emptyShard,
+  parseCoverage,
+  parseShard,
+  parseViewSnapshot,
+  parseWidgetSnapshot,
   type CoverageRecord,
   type SessionRecord,
   type ViewSnapshot,
@@ -29,6 +35,7 @@ const record = (sessionID: string, overrides: Partial<SessionRecord> = {}): Sess
   complete: true,
   samples: [{ providerID: "acme", modelID: "m1", variant: undefined, rate: 40, completedAt: NOW - 2_000 }],
   unavailable: [],
+  requests: [{ providerID: "acme", modelID: "m1", variant: undefined, at: NOW - 2_000 }],
   ...overrides,
 })
 
@@ -48,7 +55,7 @@ const viewSnapshot = (overrides: Partial<ViewSnapshot> = {}): ViewSnapshot => ({
   metricVersion: METRIC_VERSION,
   directoryFilter: "/work/a",
   range: "last30",
-  rows: [{ key: "acme/m1", providerID: "acme", modelID: "m1", median: 42, calls: 3, unavailable: false }],
+  rows: modelRows(record("ses_a").requests, record("ses_a").samples),
   lastCheckedAt: NOW - 1_000,
   savedAtMs: NOW,
   ...overrides,
@@ -97,6 +104,36 @@ function createDeferredStore(): DurableStore & { dump(): Map<string, object> } {
 
 const tksKeys = (store: Map<string, object>): string[] =>
   [...store.keys()].filter((key) => key.startsWith("tks.")).sort()
+
+test("a v1 shard on disk reads as empty and the next write replaces it", async () => {
+  const store = createMemoryStore()
+  const repository = createRepository(store)
+  const old = record("ses_a")
+  await seed(store, shardSegmentKey(old.sessionID), { schemaVersion: 1, metricVersion: 1, records: { ses_a: { ...old, requests: undefined } }, index: { ses_a: { sessionID: "ses_a", updatedAt: NOW } } })
+  expect(repository.loadAllShards().size).toBe(0)
+  await repository.putRecords([old], NOW)
+  expect(repository.loadAllShards().get(shardKey("ses_a"))?.records.ses_a).toEqual(old)
+  expect(store.read(shardSegmentKey("ses_a"))).toMatchObject({ schemaVersion: 2, metricVersion: 2 })
+})
+
+test("writers and parsers share version 2", async () => {
+  const store = createMemoryStore()
+  const repository = createRepository(store)
+  const empty = emptyShard()
+  expect(empty).toMatchObject({ schemaVersion: 2, metricVersion: 2 })
+  expect(parseShard(empty)).toEqual(empty)
+  await repository.writeCoverage(coverage(undefined))
+  await repository.writeViewSnapshot(viewSnapshot())
+  await repository.writeWidgetSnapshot(widgetRows, NOW)
+  const inventory = store.read("tks.coverage.all")
+  expect(inventory).toMatchObject({ schemaVersion: 2 })
+  expect(parseCoverage(inventory)).toEqual(coverage(undefined))
+  for (const [key, parser] of [["tks.snapshot.view.0", parseViewSnapshot], ["tks.snapshot.widgetToday", parseWidgetSnapshot]] as const) {
+    const value = store.read(key)
+    expect(value).toMatchObject({ schemaVersion: 2, metricVersion: 2 })
+    expect(value).toEqual(parser(value))
+  }
+})
 
 describe("shardKey", () => {
   test("is deterministic and stays inside the shard range", () => {

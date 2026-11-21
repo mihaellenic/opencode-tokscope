@@ -1,11 +1,11 @@
 import type { RangeFilter } from "../filters"
 import type { SessionMeta } from "../harvest"
-import type { Sample, UnavailableSample } from "../metric"
+import { TOKEN_CATEGORIES, type RequestFact, type Sample, type UnavailableSample } from "../metric"
 import type { WidgetRow } from "../sidebar/rank"
-import type { ComparisonRow } from "../stats"
+import type { ModelRow } from "../stats"
 
-export const CACHE_SCHEMA_VERSION = 1
-export const METRIC_VERSION = 1
+export const CACHE_SCHEMA_VERSION = 2
+export const METRIC_VERSION = 2
 
 export interface SessionRecord {
   sessionID: string
@@ -18,6 +18,7 @@ export interface SessionRecord {
   complete: boolean
   samples: Sample[]
   unavailable: UnavailableSample[]
+  requests: RequestFact[]
 }
 
 export interface SessionIndexEntry {
@@ -45,7 +46,7 @@ export interface ViewSnapshot {
   metricVersion: number
   directoryFilter: string | undefined
   range: RangeFilter
-  rows: ComparisonRow[]
+  rows: ModelRow[]
   lastCheckedAt: number | undefined
   savedAtMs: number
 }
@@ -64,7 +65,7 @@ export interface Tombstones {
 /** Records are keyed by session id, so ids must stay inside the durable key alphabet. */
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 
-const RANGE_FILTERS: readonly RangeFilter[] = ["last7", "last30", "last90", "all"]
+const RANGE_FILTERS: readonly RangeFilter[] = ["today", "last7", "last30", "last90", "all"]
 
 type Fields = Record<string, unknown>
 
@@ -178,7 +179,8 @@ function parseSessionRecord(raw: unknown): SessionRecord | undefined {
 
   const samples = parseRows(source.samples, parseSample)
   const unavailable = parseRows(source.unavailable, parseUnavailableSample)
-  if (samples === undefined || unavailable === undefined) return undefined
+  const requests = parseRows(source.requests, parseRequestFact)
+  if (samples === undefined || unavailable === undefined || requests === undefined) return undefined
 
   return {
     sessionID,
@@ -191,6 +193,7 @@ function parseSessionRecord(raw: unknown): SessionRecord | undefined {
     complete,
     samples,
     unavailable,
+    requests,
   }
 }
 
@@ -204,33 +207,79 @@ function parseIndexEntry(raw: unknown): SessionIndexEntry | undefined {
   return { sessionID, directory: directory.value, updatedAt }
 }
 
-function parseComparisonRow(raw: unknown): ComparisonRow | undefined {
+function parseRequestFact(raw: unknown): RequestFact | undefined {
+  const source = fieldsOf(raw)
+  if (source === undefined) return undefined
+  const providerID = nonEmptyString(source.providerID)
+  const modelID = nonEmptyString(source.modelID)
+  const variant = optionalField(source.variant, stringValue)
+  const at = finiteNumber(source.at)
+  const durationMs = optionalField(source.durationMs, nonNegativeNumber)
+  if (providerID === undefined || modelID === undefined || !variant.ok || at === undefined || !durationMs.ok) {
+    return undefined
+  }
+  const fact: RequestFact = { providerID, modelID, variant: variant.value, at }
+  if (durationMs.value !== undefined) fact.durationMs = durationMs.value
+  if (source.tokens !== undefined) {
+    const tokens = fieldsOf(source.tokens)
+    if (tokens === undefined) return undefined
+    fact.tokens = {}
+    for (const category of TOKEN_CATEGORIES) {
+      const count = optionalField(tokens[category], nonNegativeNumber)
+      if (!count.ok) return undefined
+      if (count.value !== undefined) fact.tokens[category] = count.value
+    }
+  }
+  return fact
+}
+
+function countNumber(raw: unknown): number | undefined {
+  const value = nonNegativeNumber(raw)
+  return value !== undefined && Number.isInteger(value) ? value : undefined
+}
+
+function nullableNumber(raw: unknown): number | null | undefined {
+  return raw === null ? null : nonNegativeNumber(raw)
+}
+
+function parseModelRow(raw: unknown): ModelRow | undefined {
   const source = fieldsOf(raw)
   if (source === undefined) return undefined
   const key = nonEmptyString(source.key)
   const providerID = nonEmptyString(source.providerID)
   const modelID = nonEmptyString(source.modelID)
-  const calls = nonNegativeNumber(source.calls)
-  const unavailable = source.unavailable
+  const requests = countNumber(source.requests)
+  const throughputCalls = countNumber(source.throughputCalls)
+  const total = nullableNumber(source.total)
+  const responseMedian = nullableNumber(source.responseMedian)
+  const responseP95 = nullableNumber(source.responseP95)
+  const throughput = nullableNumber(source.throughput)
+  const tokensSource = fieldsOf(source.tokens)
+  const eligibleSource = fieldsOf(source.eligible)
   if (
-    key === undefined ||
-    providerID === undefined ||
-    modelID === undefined ||
-    calls === undefined ||
-    typeof unavailable !== "boolean"
+    key === undefined || providerID === undefined || modelID === undefined ||
+    requests === undefined || throughputCalls === undefined || total === undefined ||
+    responseMedian === undefined || responseP95 === undefined || throughput === undefined ||
+    tokensSource === undefined || eligibleSource === undefined
   ) {
     return undefined
   }
-
-  let median: number | null
-  if (source.median === null) median = null
-  else {
-    const parsed = finiteNumber(source.median)
-    if (parsed === undefined) return undefined
-    median = parsed
+  const tokens = {} as ModelRow["tokens"]
+  const eligible = {} as ModelRow["eligible"]
+  for (const category of TOKEN_CATEGORIES) {
+    const value = nullableNumber(tokensSource[category])
+    if (value === undefined) return undefined
+    tokens[category] = value
   }
-
-  return { key, providerID, modelID, median, calls, unavailable }
+  for (const category of [...TOKEN_CATEGORIES, "triple", "response"] as const) {
+    const value = countNumber(eligibleSource[category])
+    if (value === undefined) return undefined
+    eligible[category] = value
+  }
+  return {
+    key, providerID, modelID, requests, tokens, total,
+    responseMedian, responseP95, throughput, throughputCalls, eligible,
+  }
 }
 
 function parseWidgetRow(raw: unknown): WidgetRow | undefined {
@@ -330,7 +379,7 @@ export function parseViewSnapshot(raw: unknown): ViewSnapshot | undefined {
   const directoryFilter = optionalField(source.directoryFilter, stringValue)
   const lastCheckedAt = optionalField(source.lastCheckedAt, finiteNumber)
   const savedAtMs = finiteNumber(source.savedAtMs)
-  const rows = parseRows(source.rows, parseComparisonRow)
+  const rows = parseRows(source.rows, parseModelRow)
   if (!directoryFilter.ok || !lastCheckedAt.ok || savedAtMs === undefined || rows === undefined) return undefined
 
   return {
@@ -372,7 +421,7 @@ export function parseTombstones(raw: unknown): Tombstones | undefined {
 
 export function recordFrom(
   meta: SessionMeta,
-  scan: { samples: Sample[]; unavailable: UnavailableSample[] },
+  scan: { samples: Sample[]; unavailable: UnavailableSample[]; requests: RequestFact[] },
   nowMs: number,
 ): SessionRecord {
   return {
@@ -386,5 +435,6 @@ export function recordFrom(
     complete: true,
     samples: scan.samples,
     unavailable: scan.unavailable,
+    requests: scan.requests,
   }
 }

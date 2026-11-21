@@ -1,4 +1,4 @@
-import { classifyAssistant, type AssistantMessage, type Sample, type UnavailableSample } from "./metric"
+import { classifyAssistant, requestFact, type RequestFact, type Sample, type UnavailableSample } from "./metric"
 import type { SessionMessageInfo } from "@opencode/client"
 
 export interface SessionMeta {
@@ -43,6 +43,7 @@ export interface HarvestOptions {
 export interface HarvestResult {
   samples: Sample[]
   unavailable: UnavailableSample[]
+  requests: RequestFact[]
   variants: string[]
 }
 
@@ -94,19 +95,26 @@ export function inRangeSamples(
   }
 }
 
-export function collectVariants(samples: Sample[], unavailable: UnavailableSample[]): string[] {
+export function inRangeRequests(requests: RequestFact[], fromMs: number | undefined): RequestFact[] {
+  if (fromMs === undefined) return requests
+  return requests.filter((request) => request.at >= fromMs)
+}
+
+export function collectVariants(samples: Sample[], unavailable: UnavailableSample[], requests: RequestFact[] = []): string[] {
   const variantSet = new Set<string>()
   for (const sample of samples) if (sample.variant !== undefined) variantSet.add(sample.variant)
   for (const sample of unavailable) if (sample.variant !== undefined) variantSet.add(sample.variant)
+  for (const request of requests) if (request.variant !== undefined) variantSet.add(request.variant)
   return [...variantSet].sort()
 }
 
 export async function scanMessages(
   client: HarvestClient,
   session: SessionMeta,
-): Promise<{ samples: Sample[]; unavailable: UnavailableSample[] }> {
+): Promise<{ samples: Sample[]; unavailable: UnavailableSample[]; requests: RequestFact[] }> {
   const samples: Sample[] = []
   const unavailable: UnavailableSample[] = []
+  const requests: RequestFact[] = []
 
   const seenCursors = new Set<string>()
   let messageCursor: string | undefined
@@ -119,6 +127,7 @@ export async function scanMessages(
     for (const message of page.data) {
       if (message.type !== "assistant") continue
       if (session.fork !== undefined && message.time.created < session.time.created) continue
+      requests.push(requestFact(message))
       const result = classifyAssistant(message)
       if (result.kind === "measured") samples.push(result.sample)
       else if (result.kind === "unavailable") unavailable.push(result.sample)
@@ -130,7 +139,7 @@ export async function scanMessages(
     }
   } while (messageCursor !== undefined)
 
-  return { samples, unavailable }
+  return { samples, unavailable, requests }
 }
 
 export async function collectMeasurements(
@@ -147,7 +156,7 @@ export async function collectMeasurements(
         session.location.directory === options.directory),
   )
 
-  const perSession: { samples: Sample[]; unavailable: UnavailableSample[] }[] = []
+  const perSession: Awaited<ReturnType<typeof scanMessages>>[] = []
   let scanned = 0
   let nextSession = 0
   const concurrency = Math.max(1, Math.min(options.concurrency ?? DEFAULT_CONCURRENCY, inRange.length))
@@ -172,5 +181,6 @@ export async function collectMeasurements(
     options.fromMs,
   )
 
-  return { samples, unavailable, variants: collectVariants(samples, unavailable) }
+  const requests = inRangeRequests(perSession.flatMap((entry) => entry.requests), options.fromMs)
+  return { samples, unavailable, requests, variants: collectVariants(samples, unavailable, requests) }
 }

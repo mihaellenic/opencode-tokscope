@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionMessageInfo } from "@opencode/client"
 import type { AssistantMessage } from "../src/metric"
+import { requestFact, TOKEN_CATEGORIES } from "../src/metric"
 
 type AssistantOverrides = {
   created?: number
@@ -34,6 +35,86 @@ const tokens = (input: number, output: number, reasoning: number) => ({
   output,
   reasoning,
   cache: { read: 0, write: 0 },
+})
+
+describe("requestFact", () => {
+  test("keeps all five categories, recorded zero stays 0", () => {
+    const fact = requestFact(assistant({ tokens: { input: 0, output: 5, reasoning: 0, cache: { read: 2, write: 0 } } }))
+
+    expect(TOKEN_CATEGORIES).toEqual(["input", "output", "reasoning", "cacheRead", "cacheWrite"])
+    expect(fact.tokens).toEqual({ input: 0, output: 5, reasoning: 0, cacheRead: 2, cacheWrite: 0 })
+  })
+
+  test("missing tokens omits the tokens key", () => {
+    expect(requestFact(assistant())).not.toHaveProperty("tokens")
+  })
+
+  test("negative, NaN and string fields are omitted, valid siblings kept", () => {
+    const fact = requestFact(assistant({
+      tokens: { input: NaN, output: -1, reasoning: "3" as never, cache: { read: 4, write: Infinity } },
+    }))
+
+    expect(fact.tokens).toEqual({ cacheRead: 4 })
+    expect(JSON.parse(JSON.stringify(fact.tokens))).toEqual(fact.tokens)
+  })
+
+  test("partial and wholly invalid tokens omit absent keys", () => {
+    expect(requestFact(assistant({ tokens: { output: 5 } as never })).tokens).toEqual({ output: 5 })
+    expect(requestFact(assistant({ tokens: { output: -1 } as never }))).not.toHaveProperty("tokens")
+  })
+
+  test("at is completed, else created", () => {
+    expect(requestFact(assistant({ created: 1_000, completed: 3_000 })).at).toBe(3_000)
+    expect(requestFact(assistant({ created: 1_000 })).at).toBe(1_000)
+    expect(requestFact(assistant({ completed: 0 })).at).toBe(0)
+  })
+
+  test("duration eligible only when finished, not errored, streamed>created, completed>=streamed", () => {
+    const happy = { created: 1_000, streamed: 2_000, completed: 3_000 }
+    expect(requestFact(assistant(happy)).durationMs).toBe(1_000)
+    expect(requestFact(assistant({ ...happy, completed: 2_000 })).durationMs).toBe(1_000)
+    for (const overrides of [
+      { error: { type: "provider" } },
+      { completed: undefined },
+      { streamed: undefined },
+      { streamed: 1_000 },
+      { streamed: 500 },
+      { completed: 1_500 },
+      { streamed: NaN },
+      { created: NaN },
+      { created: -Infinity },
+      { streamed: Infinity },
+      { completed: Infinity },
+      { completed: NaN },
+    ]) {
+      expect(requestFact(assistant({ ...happy, ...overrides }))).not.toHaveProperty("durationMs")
+    }
+  })
+
+  test("errored request with valid tokens still carries tokens", () => {
+    const fact = requestFact(assistant({ tokens: tokens(10, 20, 30), error: { type: "provider" } }))
+    expect(fact.tokens).toEqual({ input: 10, output: 20, reasoning: 30, cacheRead: 0, cacheWrite: 0 })
+    expect(fact).not.toHaveProperty("durationMs")
+  })
+
+  test("abandoned step: completed, no streamed, no tokens", () => {
+    const fact = requestFact(assistant({ completed: 3_000 }))
+    expect(fact).not.toHaveProperty("durationMs")
+    expect(fact).not.toHaveProperty("tokens")
+  })
+
+  test("fact contains no message text", () => {
+    const message = assistant({
+      streamed: 2_000, completed: 3_000, tokens: tokens(10, 20, 30),
+      model: { providerID: "openai", id: "gpt-5", variant: "high" },
+    })
+    message.content = [{ type: "text", text: "SECRET-TEXT" }] as never
+    const fact = requestFact(message)
+
+    expect(fact).toMatchObject({ providerID: "openai", modelID: "gpt-5", variant: "high" })
+    expect(JSON.stringify(fact)).not.toContain("SECRET-TEXT")
+    expect(Object.keys(fact).every((key) => ["providerID", "modelID", "variant", "at", "tokens", "durationMs"].includes(key))).toBe(true)
+  })
 })
 
 describe("classifyAssistant", () => {

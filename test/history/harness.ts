@@ -59,6 +59,15 @@ export function unmeasured(completedAt: number, variant?: string): AssistantMess
   return assistant({ created: completedAt - 2_000, streamed: completedAt - 1_000, completed: completedAt, variant })
 }
 
+export function requestOnly(completedAt: number, opts: { variant?: string; failed?: boolean; unfinished?: boolean } = {}): AssistantMessage {
+  const message = assistant({ created: completedAt - 2_000, completed: opts.unfinished ? undefined : completedAt, variant: opts.variant })
+  return opts.failed ? { ...message, error: { type: "unknown", message: "failed" } } : message
+}
+
+export function withTokens(completedAt: number, usage: TokenUsage): AssistantMessage {
+  return assistant({ created: completedAt - 2_000, streamed: completedAt - 1_000, completed: completedAt, usage })
+}
+
 function meta(id: string, updatedAt: number, directory: string | undefined = "/work/a"): SessionMeta {
   return {
     id,

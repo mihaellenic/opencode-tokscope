@@ -1,17 +1,19 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createMemo, createSignal, Match, Switch } from "solid-js"
+import type { ScrollBoxRenderable } from "@opentui/core"
+import { createEffect, createMemo, createSignal, Match, Show, Switch } from "solid-js"
 import { DEFAULT_FILTERS, rangeStartMs, type Filters, type RangeFilter, type ScopeFilter } from "../filters"
-import { formatCoverage, modelDisplayName } from "../format"
+import { modelDisplayName } from "../format"
 import type { HistoryService, ViewState } from "../history/service"
 import { Spinner } from "../spinner"
-import { applyReasoningFilter, comparisonRows, dailySeries, type ReasoningFilter } from "../stats"
-import { Header, rangeLabel, reasoningLabel } from "./header"
+import { modelRows, dailySeries, type ModelRow } from "../stats"
+import { Header } from "./header"
+import { DetailPanel } from "./detail"
 import { HELP_LINE } from "./help"
 import { nextSelection } from "./selection"
 import { pickViewPageState, type PageState } from "./state"
-import { EmptyState, UnmeasurableState } from "./states"
-import { ComparisonTable } from "./table"
+import { EmptyState } from "./states"
+import { ModelTable } from "./table"
 import { TrendPanel } from "./trend"
 
 const SCOPE_OPTIONS: { title: string; value: ScopeFilter }[] = [
@@ -20,6 +22,7 @@ const SCOPE_OPTIONS: { title: string; value: ScopeFilter }[] = [
 ]
 
 const RANGE_OPTIONS: { title: string; value: RangeFilter }[] = [
+  { title: "Today", value: "today" },
   { title: "Last 7 days", value: "last7" },
   { title: "Last 30 days", value: "last30" },
   { title: "Last 90 days", value: "last90" },
@@ -57,13 +60,9 @@ export function TokscopePage(props: {
   /** Trend windows advance with the last completed check rather than with page-open time. */
   const referenceNow = () => state().lastCheckedAt ?? Date.now()
 
-  const filtered = createMemo(() =>
-    applyReasoningFilter(state().samples, state().unavailable, filters().reasoning),
-  )
-
   const pageState = createMemo<PageState>(() => pickViewPageState(state()))
 
-  const rows = createMemo(() => comparisonRows(filtered().samples, filtered().unavailable))
+  const rows = createMemo(() => modelRows(state().requests, state().samples))
 
   createEffect(() => {
     const list = rows()
@@ -87,7 +86,7 @@ export function TokscopePage(props: {
     const key = selectedKey()
     if (key === undefined) return []
     const nowMs = referenceNow()
-    return dailySeries(filtered().samples, key, rangeStartMs(filters().range, nowMs), nowMs)
+    return dailySeries(state().samples, key, rangeStartMs(filters().range, nowMs), nowMs)
   })
 
   /** The row key the current day anchor belongs to; a change re-anchors, a publication does not. */
@@ -108,9 +107,7 @@ export function TokscopePage(props: {
   const moveDay = (delta: number) =>
     setSelectedDay((current) => Math.max(0, Math.min(current + delta, Math.max(0, series().length - 1))))
 
-  const rowLabel = () => {
-    const row = selectedRow()
-    if (row === undefined) return "No row selected"
+  const rowLabels = (row: ModelRow) => {
     const name = modelDisplayName(
       props.context.data.location.model.list(),
       row.providerID,
@@ -119,16 +116,7 @@ export function TokscopePage(props: {
     const provider =
       props.context.data.location.provider.list()?.find((item) => item.id === row.providerID)?.name ??
       row.providerID
-    return `${name} · ${provider}`
-  }
-
-  const reasoningOptions = () => {
-    const options: { title: string; value: ReasoningFilter }[] = [{ title: "All settings", value: "all" }]
-    const value = state()
-    for (const variant of value.variants) options.push({ title: variant, value: variant })
-    const hasUnknown = [...value.samples, ...value.unavailable].some((item) => item.variant === undefined)
-    if (hasUnknown) options.push({ title: "unknown", value: "unknown" })
-    return options
+    return { name, provider }
   }
 
   const pickScope = async () => {
@@ -149,15 +137,6 @@ export function TokscopePage(props: {
     if (chosen !== undefined) setFilters((previous) => ({ ...previous, range: chosen }))
   }
 
-  const pickReasoning = async () => {
-    const chosen = await props.context.ui.dialog.select<ReasoningFilter>({
-      title: "Reasoning setting",
-      current: filters().reasoning,
-      options: reasoningOptions(),
-    })
-    if (chosen !== undefined) setFilters((previous) => ({ ...previous, reasoning: chosen }))
-  }
-
   props.context.keymap.layer(() => ({
     commands: [
       { bind: "escape", title: "back", run: props.onClose },
@@ -169,14 +148,17 @@ export function TokscopePage(props: {
       { bind: "right", title: "next day", run: () => moveDay(1) },
       { bind: "s", title: "scope", run: pickScope },
       { bind: "t", title: "time range", run: pickRange },
-      { bind: "r", title: "reasoning", run: pickReasoning },
     ],
   }))
 
-  const coverage = () =>
-    pageState() === "loading"
-      ? ""
-      : `  ·  ${formatCoverage(filtered().samples.length, filtered().unavailable.length)}`
+  let scroll!: ScrollBoxRenderable
+  const [viewport, setViewport] = createSignal({ width: 0, height: 0 })
+  const [detailHeight, setDetailHeight] = createSignal(0)
+  const [trendHeight, setTrendHeight] = createSignal(0)
+  // Keep one gutter cell even while the automatic scrollbar is hidden: wrapping stays stable.
+  const width = () => Math.max(1, Math.min(viewport().width || Infinity, dimensions().width - 3))
+  // Native measurements include wrapped labels/no-data copy and the actual header/help height.
+  const tableHeight = () => Math.max(3, viewport().height - detailHeight() - trendHeight() - 2)
 
   return (
     <box
@@ -189,7 +171,17 @@ export function TokscopePage(props: {
     >
       <Header context={props.context} filters={filters()} />
 
-      <box flexGrow={1} flexDirection="column" gap={1}>
+      <scrollbox
+        ref={scroll}
+        flexGrow={1}
+        minHeight={0}
+        scrollX={false}
+        focused={false}
+        verticalScrollbarOptions={{ width: 1 }}
+        viewportOptions={{ onSizeChange() {
+          setViewport({ width: scroll.viewport.width, height: scroll.viewport.height })
+        } }}
+      >
         <Switch>
           <Match when={pageState() === "loading"}>
             <Spinner context={props.context} />
@@ -197,33 +189,35 @@ export function TokscopePage(props: {
           <Match when={pageState() === "empty"}>
             <EmptyState context={props.context} filters={filters()} />
           </Match>
-          <Match when={pageState() === "unmeasurable"}>
-            <UnmeasurableState context={props.context} />
-          </Match>
           <Match when={pageState() === "ready"}>
-            <box flexDirection="column" flexGrow={1} gap={1}>
-              <ComparisonTable
+            <box width={width()} flexDirection="column" gap={1} flexShrink={0}>
+              <ModelTable
                 context={props.context}
                 rows={rows()}
+                labels={rowLabels}
                 selectedKey={selectedKey()}
-                width={Math.max(20, dimensions().width - 2)}
-                height={Math.max(3, dimensions().height - 27)}
+                width={width()}
+                height={tableHeight()}
               />
-              <TrendPanel
-                context={props.context}
-                series={series()}
-                selectedDay={selectedDay()}
-                rowLabel={rowLabel()}
-                rangeLabel={rangeLabel(filters().range)}
-                reasoningLabel={reasoningLabel(filters().reasoning)}
-                width={Math.max(20, dimensions().width - 2)}
-              />
+              <box flexDirection="column" flexShrink={0} onSizeChange={function () { setDetailHeight(this.height) }}>
+                <Show when={selectedRow()}>
+                  {row => <DetailPanel context={props.context} row={row()} labels={rowLabels(row())} width={width()} />}
+                </Show>
+              </box>
+              <box flexDirection="column" flexShrink={0} onSizeChange={function () { setTrendHeight(this.height) }}>
+                <TrendPanel
+                  context={props.context}
+                  series={series()}
+                  selectedDay={selectedDay()}
+                  width={width()}
+                />
+              </box>
             </box>
           </Match>
         </Switch>
-      </box>
+      </scrollbox>
 
-      <text fg={theme.text.muted}>{HELP_LINE + coverage()}</text>
+      <text fg={theme.text.muted} flexShrink={0}>{HELP_LINE}</text>
     </box>
   )
 }

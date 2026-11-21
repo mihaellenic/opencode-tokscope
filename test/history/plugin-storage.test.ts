@@ -61,6 +61,7 @@ const record: SessionRecord = {
   complete: true,
   samples: [{ providerID: "p", modelID: "m", variant: undefined, rate: 10, completedAt: 2_000 }],
   unavailable: [],
+  requests: [{ providerID: "p", modelID: "m", variant: undefined, at: 2_000 }],
 }
 
 describe("createPluginDurableStore", () => {

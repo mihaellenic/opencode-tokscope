@@ -5,7 +5,7 @@ import type { Sample } from "../../src/metric"
 import { axisLine, barChar, PLOT_ROWS } from "../../src/page/chart"
 import { entryLines, headingLine } from "../../src/sidebar/layout"
 import { widgetRows } from "../../src/sidebar/rank"
-import { barLevels, comparisonRows, dailySeries } from "../../src/stats"
+import { barLevels, modelRows, dailySeries } from "../../src/stats"
 
 process.env.TZ = "UTC"
 const now = Date.UTC(2026, 9, 25, 18)
@@ -40,7 +40,7 @@ const samples: Sample[] = models.flatMap((model) => Array.from({ length: model.c
     ? ((call * 41) % 171 - 85) * 1.1
     : (call % 30 - 14) * 0.8) + ((call % 3) - 1) * 3,
 })))
-const rows = comparisonRows(samples, [])
+const rows = modelRows(samples.map(sample => ({ providerID: sample.providerID, modelID: sample.modelID, at: sample.completedAt, variant: sample.variant })), samples)
 const selected = rows.find((row) => row.providerID === "demo-cloud" && row.modelID === "glm")!
 const series = dailySeries(samples, selected.key, Date.UTC(2026, 8, 25), now)
 const levels = barLevels(series, PLOT_ROWS)
@@ -48,17 +48,17 @@ type Segment = { text: string; color?: string; bold?: boolean; background?: stri
 type Line = Segment[]
 const line = (text = "", color = muted, bold = false): Line => [{ text, color, bold }]
 const pad = (text: string, size: number) => text.length <= size ? text.padEnd(size) : text.slice(0, size - 1) + "…"
-// Column budgets mirror src/page/table.tsx at terminal width minus page padding.
+// Legacy documentation mockup columns; not a live rendering of src/page/table.tsx.
 const cells = (model: string, provider: string, rate: string, calls: string) =>
   [pad(model, 108), pad(provider, 18), pad(rate, 13), pad(calls, 5)].join("  ")
 const overview: Line[] = [
-  [{ text: "Tokscope", color: foreground, bold: true }, { text: " · all projects · last 30 days · reasoning: all settings" }],
+  [{ text: "Tokscope", color: foreground, bold: true }, { text: " · all projects (s) · last 30 days (t)" }],
   line(), line("  " + cells("Model", "Provider", "Median tok/s", "Calls")),
    ...rows.map((row) => line(`${row.key === selected.key ? "› " : "  "}${cells(
     modelName(row.providerID, row.modelID), providerName(row.providerID),
-    row.median === null ? "unavailable" : formatRate(row.median), String(row.calls),
+    row.throughput === null ? "n/a" : formatRate(row.throughput), String(row.requests),
    )}`, row.key === selected.key ? foreground : muted, row.key === selected.key)),
-  line(), line("Trend: GLM 5.3 · Ollama Cloud · last 30 days · all settings"), line(),
+  line(), line("Trend: GLM 5.3 · Ollama Cloud · last 30 days"), line(),
   ...Array.from({ length: PLOT_ROWS }, (_, index): Line => [
     ...levels.map((level, day) => ({
       text: barChar(level, PLOT_ROWS - 1 - index, PLOT_ROWS) + " ",

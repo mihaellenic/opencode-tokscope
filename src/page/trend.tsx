@@ -9,9 +9,6 @@ export function TrendPanel(props: {
   context: Plugin.Context
   series: readonly DayPoint[]
   selectedDay: number
-  rowLabel: string
-  rangeLabel: string
-  reasoningLabel: string
   width: number
 }) {
   const theme = props.context.theme
@@ -28,13 +25,13 @@ export function TrendPanel(props: {
     const point = props.series[props.selectedDay]
     if (point === undefined) return "no measured calls"
     if (point.median === null) return `${formatDayLabel(point.date)} · no measured calls`
-    return `${formatDayLabel(point.date)} · ${point.median.toFixed(1)} tok/s · ${point.calls} calls`
+    return `${formatDayLabel(point.date)} · ${point.median.toFixed(1)} tok/s`
   }
 
   return (
-    <box flexDirection="column" gap={1}>
+    <box flexDirection="column" flexShrink={0}>
       <text fg={theme.text.muted} attributes={TextAttributes.BOLD}>
-        {`Trend: ${props.rowLabel} · ${props.rangeLabel} · ${props.reasoningLabel}`}
+        Speed by day · tok/s
       </text>
       <Show
         when={measurable()}

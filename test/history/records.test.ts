@@ -16,6 +16,7 @@ import {
   type ViewSnapshot,
 } from "../../src/history/records"
 import type { Sample } from "../../src/metric"
+import { modelRows } from "../../src/stats"
 
 const NOW = 1_700_000_000_000
 
@@ -38,6 +39,7 @@ const record = (sessionID: string, overrides: Partial<SessionRecord> = {}): Sess
   complete: true,
   samples: [sample(40, NOW - 2_000)],
   unavailable: [],
+  requests: [{ providerID: "acme", modelID: "m1", variant: undefined, at: NOW - 2_000, tokens: { input: 0, output: 40, reasoning: 2, cacheRead: 3, cacheWrite: 4 }, durationMs: 1_000 }],
   ...overrides,
 })
 
@@ -127,6 +129,7 @@ describe("recordFrom", () => {
     const scan = {
       samples: [sample(40, NOW - 2_000), sample(80, NOW - 1_500, "high")],
       unavailable: [{ providerID: "acme", modelID: "m2", variant: undefined, completedAt: NOW - 1_800 }],
+      requests: record("ses_a").requests,
     }
 
     const result = recordFrom(session, scan, NOW)
@@ -142,12 +145,14 @@ describe("recordFrom", () => {
       complete: true,
       samples: scan.samples,
       unavailable: scan.unavailable,
+      requests: scan.requests,
     })
     expect(Object.keys(result).sort()).toEqual([
       "complete",
       "createdAt",
       "directory",
       "fork",
+      "requests",
       "samples",
       "scannedAtMs",
       "sessionID",
@@ -160,7 +165,7 @@ describe("recordFrom", () => {
   test("marks sessions without a location or fork", () => {
     const result = recordFrom(
       meta({ location: undefined, fork: undefined }),
-      { samples: [], unavailable: [] },
+      { samples: [], unavailable: [], requests: [] },
       NOW,
     )
     expect(result.directory).toBeUndefined()
@@ -170,6 +175,26 @@ describe("recordFrom", () => {
 })
 
 describe("parseShard", () => {
+  test("round trips a record with requests", () => {
+    const value = shard([record("ses_a")])
+    expect(parseShard(persisted(value))).toEqual(value)
+  })
+
+  test("rejects a record whose requests entry is malformed", () => {
+    const fact = record("ses_a").requests[0]
+    for (const invalid of [{ ...fact, at: undefined }, { ...fact, providerID: "" }, { ...fact, modelID: "" }, { ...fact, variant: 5 }, { ...fact, tokens: { input: -1 } }, { ...fact, durationMs: NaN }, { ...fact, durationMs: -1 }, { ...fact, tokens: [] }]) {
+      const value = shard([record("ses_a")])
+      expect(parseShard({ ...value, records: { ses_a: { ...value.records.ses_a, requests: [invalid] } } })?.records.ses_a).toBeUndefined()
+    }
+    const value = shard([record("ses_a")])
+    const parsed = parseShard({ ...value, records: { ses_a: { ...value.records.ses_a, requests: [{ ...fact, tokens: { input: 0, secret: "discard" } }] } } })
+    expect(parsed?.records.ses_a.requests[0].tokens).toEqual({ input: 0 })
+  })
+
+  test("rejects a record with no requests array", () => {
+    const value = shard([record("ses_a")])
+    expect(parseShard({ ...value, records: { ses_a: { ...value.records.ses_a, requests: undefined } } })?.records.ses_a).toBeUndefined()
+  })
   test("rejects unknown schema and metric versions", () => {
     const valid = shard([record("ses_a")])
     expect(parseShard(valid)).toBeDefined()
@@ -271,18 +296,18 @@ describe("parseCoverage", () => {
 })
 
 describe("parseViewSnapshot", () => {
-  const row = { key: "acme/m1", providerID: "acme", modelID: "m1", median: 42, calls: 3, unavailable: false }
+  const row = modelRows(record("ses_a").requests, record("ses_a").samples)[0]
   const valid: ViewSnapshot = {
     schemaVersion: CACHE_SCHEMA_VERSION,
     metricVersion: METRIC_VERSION,
     directoryFilter: "/work/a",
     range: "last30",
-    rows: [row, { ...row, key: "acme/m2", modelID: "m2", median: null, calls: 0, unavailable: true }],
+    rows: [row, ...modelRows([{ providerID: "acme", modelID: "m2", variant: undefined, at: NOW }], [])],
     lastCheckedAt: NOW - 1_000,
     savedAtMs: NOW,
   }
 
-  test("accepts a valid snapshot, including a nullable median", () => {
+  test("round trips ModelRow rows including null fields", () => {
     expect(parseViewSnapshot(persisted(valid))).toEqual(valid)
     const withoutFilters = parseViewSnapshot(
       persisted({ ...valid, directoryFilter: undefined, lastCheckedAt: undefined }),
@@ -291,17 +316,36 @@ describe("parseViewSnapshot", () => {
     expect(withoutFilters?.lastCheckedAt).toBeUndefined()
   })
 
+  test("parseModelRow rejects NaN totals and malformed nullable fields or counts", () => {
+    for (const invalid of [{ ...row, total: NaN }, { ...row, total: undefined }, { ...row, tokens: { ...row.tokens, input: Infinity } }, { ...row, responseMedian: NaN }, { ...row, responseP95: -1 }, { ...row, throughput: Infinity }, { ...row, requests: 0.5 }, { ...row, throughputCalls: -1 }, { ...row, eligible: { ...row.eligible, response: 0.5 } }]) {
+      expect(parseViewSnapshot({ ...valid, rows: [invalid] })).toBeUndefined()
+    }
+  })
+
   test("rejects non-finite savedAtMs, non-array rows, unknown ranges, and stale versions", () => {
     expect(parseViewSnapshot({ ...valid, savedAtMs: Number.NaN })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, savedAtMs: Number.POSITIVE_INFINITY })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, savedAtMs: "now" })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, rows: "rows" })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, rows: undefined })).toBeUndefined()
-    expect(parseViewSnapshot({ ...valid, rows: [{ ...row, median: Number.NaN }] })).toBeUndefined()
+    expect(parseViewSnapshot({ ...valid, rows: [{ ...row, throughput: Number.NaN }] })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, range: "last365" })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, metricVersion: METRIC_VERSION + 1 })).toBeUndefined()
     expect(parseViewSnapshot({ ...valid, schemaVersion: CACHE_SCHEMA_VERSION + 1 })).toBeUndefined()
   })
+})
+
+test("version 1 shard, coverage, view snapshot and widget snapshot are all rejected", () => {
+  expect(CACHE_SCHEMA_VERSION).toBe(2)
+  expect(METRIC_VERSION).toBe(2)
+  expect(parseShard({ ...emptyShard(), schemaVersion: 1 })).toBeUndefined()
+  expect(parseShard({ ...emptyShard(), metricVersion: 1 })).toBeUndefined()
+  expect(parseCoverage({ schemaVersion: 1 })).toBeUndefined()
+  const snapshot = { schemaVersion: 2, metricVersion: 2, range: "all", rows: [], savedAtMs: NOW }
+  for (const versions of [{ schemaVersion: 1 }, { metricVersion: 1 }]) {
+    expect(parseViewSnapshot({ ...snapshot, ...versions })).toBeUndefined()
+    expect(parseWidgetSnapshot({ ...snapshot, ...versions })).toBeUndefined()
+  }
 })
 
 describe("parseWidgetSnapshot", () => {
