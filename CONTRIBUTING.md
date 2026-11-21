@@ -16,6 +16,8 @@ bun run build
 
 Development pins match the tested host (`opencode v2.2.0`): `@opencode/plugin@2.1.2`, `@opencode/client@2.1.2`, `@opentui/*@0.8.0`, `solid-js@1.9.17`.
 
+The published plugin needs OpenCode to load it. The SDK is a development dependency, and OpenTUI and Solid are optional npm peers, so installing the plugin does not pull in a second copy of the host runtimes. The root `glob` and `minimatch` overrides patch the development graph while those upstream ranges catch up (see [#24](https://github.com/mihaellenic/opencode-tokscope/issues/24)); they do not change OpenCode's own dependencies.
+
 For local discovery, symlink the checkout into OpenCode's plugin directory:
 
 ```bash
