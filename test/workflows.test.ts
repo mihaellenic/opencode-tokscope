@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -57,17 +58,25 @@ function runBlocks(source: string): string[] {
 function recoverRelease(releaseFixture: { tag_name: string; draft?: boolean | string }) {
   const resolveRef = runBlocks(jobBlock(release, "publish")).find((body) => body.includes("/releases/tags/$tag"))
   if (!resolveRef) throw new Error("missing Resolve release ref script")
-  return spawnSync("bash", ["-c", `gh() { printf '%s' "$RELEASE_FIXTURE"; }\n${resolveRef}`], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      EVENT_NAME: "workflow_dispatch",
-      DISPATCH_TAG: "v1.0.0",
-      GITHUB_REPOSITORY: "mihaellenic/opencode-tokscope",
-      GITHUB_OUTPUT: "/dev/stdout",
-      RELEASE_FIXTURE: JSON.stringify(releaseFixture),
-    },
-  })
+  const dir = mkdtempSync(join(tmpdir(), "tokscope-release-recovery-"))
+  const outputPath = join(dir, "github-output")
+  try {
+    writeFileSync(outputPath, "")
+    const result = spawnSync("bash", ["-c", `gh() { printf '%s' "$RELEASE_FIXTURE"; }\n${resolveRef}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EVENT_NAME: "workflow_dispatch",
+        DISPATCH_TAG: "v1.0.0",
+        GITHUB_REPOSITORY: "mihaellenic/opencode-tokscope",
+        GITHUB_OUTPUT: outputPath,
+        RELEASE_FIXTURE: JSON.stringify(releaseFixture),
+      },
+    })
+    return { status: result.status, stderr: result.stderr, output: readFileSync(outputPath, "utf8") }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 describe("CI workflow structure", () => {
@@ -169,8 +178,9 @@ describe("release workflow security and gating", () => {
 
   test("recovers the requested non-draft release", () => {
     const result = recoverRelease({ tag_name: "v1.0.0", draft: false })
+    expect(result.stderr).toBe("")
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain("tag=v1.0.0")
+    expect(result.output).toBe("tag=v1.0.0\n")
   })
 
   for (const fixture of [
@@ -182,7 +192,7 @@ describe("release workflow security and gating", () => {
     test(`refuses release recovery for ${JSON.stringify(fixture)}`, () => {
       const result = recoverRelease(fixture)
       expect(result.status).toBe(1)
-      expect(result.stdout).not.toContain("tag=")
+      expect(result.output).toBe("")
     })
   }
 
