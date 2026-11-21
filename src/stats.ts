@@ -1,14 +1,17 @@
-import type { Sample, UnavailableSample } from "./metric"
+import { TOKEN_CATEGORIES, type RequestFact, type Sample, type TokenCategory } from "./metric"
 
-export type ReasoningFilter = "all" | "unknown" | string
-
-export interface ComparisonRow {
+export interface ModelRow {
   key: string
   providerID: string
   modelID: string
-  median: number | null
-  calls: number
-  unavailable: boolean
+  requests: number
+  tokens: Record<TokenCategory, number | null>
+  total: number | null
+  responseMedian: number | null
+  responseP95: number | null
+  throughput: number | null
+  throughputCalls: number
+  eligible: Record<TokenCategory | "triple" | "response", number>
 }
 
 export interface DayPoint {
@@ -18,70 +21,89 @@ export interface DayPoint {
 }
 
 export function median(values: readonly number[]): number | null {
-  if (values.length === 0) return null
-  const sorted = [...values].sort((a, b) => a - b)
+  return sortedMedian([...values].sort((a, b) => a - b))
+}
+
+function sortedMedian(sorted: readonly number[]): number | null {
+  if (sorted.length === 0) return null
   const middle = Math.floor(sorted.length / 2)
   if (sorted.length % 2 === 1) return sorted[middle]
   return (sorted[middle - 1] + sorted[middle]) / 2
 }
 
-export function applyReasoningFilter(
-  samples: Sample[],
-  unavailable: UnavailableSample[],
-  filter: ReasoningFilter,
-): { samples: Sample[]; unavailable: UnavailableSample[] } {
-  if (filter === "all") return { samples, unavailable }
-  const matches = (variant: string | undefined) =>
-    filter === "unknown" ? variant === undefined : variant === filter
-  return {
-    samples: samples.filter((sample) => matches(sample.variant)),
-    unavailable: unavailable.filter((sample) => matches(sample.variant)),
+export function percentile95(values: readonly number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.ceil(0.95 * sorted.length) - 1]
+}
+
+export function modelRows(requests: readonly RequestFact[], samples: readonly Sample[]): ModelRow[] {
+  type Accumulator = {
+    row: ModelRow
+    triple: { input: number; output: number; reasoning: number }
+    durations: number[]
+    rates: number[]
   }
+  const groups = new Map<string, Accumulator>()
+  for (const request of requests) {
+    const key = rowKey(request.providerID, request.modelID)
+    let group = groups.get(key)
+    if (group === undefined) {
+      group = {
+        row: {
+          key, providerID: request.providerID, modelID: request.modelID, requests: 0,
+          tokens: { input: null, output: null, reasoning: null, cacheRead: null, cacheWrite: null },
+          total: null, responseMedian: null, responseP95: null,
+          throughput: null, throughputCalls: 0,
+          eligible: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, triple: 0, response: 0 },
+        },
+        triple: { input: 0, output: 0, reasoning: 0 }, durations: [], rates: [],
+      }
+      groups.set(key, group)
+    }
+    const { row } = group
+    row.requests++
+    for (const category of TOKEN_CATEGORIES) {
+      const count = request.tokens?.[category]
+      if (count !== undefined) {
+        row.tokens[category] = (row.tokens[category] ?? 0) + count
+        row.eligible[category]++
+      }
+    }
+    const { input, output, reasoning } = request.tokens ?? {}
+    if (input !== undefined && output !== undefined && reasoning !== undefined) {
+      group.triple.input += input
+      group.triple.output += output
+      group.triple.reasoning += reasoning
+      row.eligible.triple++
+    }
+    if (request.durationMs !== undefined) group.durations.push(request.durationMs)
+  }
+  for (const sample of samples) groups.get(rowKey(sample.providerID, sample.modelID))?.rates.push(sample.rate)
+
+  const rows: ModelRow[] = []
+  for (const { row, triple, durations, rates } of groups.values()) {
+    if (row.eligible.triple > 0) row.total = triple.input + triple.output + triple.reasoning
+    durations.sort((a, b) => a - b)
+    row.responseMedian = sortedMedian(durations)
+    row.responseP95 = durations.length === 0 ? null : durations[Math.ceil(0.95 * durations.length) - 1]
+    row.eligible.response = durations.length
+    row.throughput = median(rates)
+    row.throughputCalls = rates.length
+    rows.push(row)
+  }
+  return rows.sort((a, b) => {
+    if (a.throughput !== null && b.throughput !== null) {
+      return b.throughput - a.throughput || b.throughputCalls - a.throughputCalls || a.key.localeCompare(b.key)
+    }
+    if (a.throughput !== null) return -1
+    if (b.throughput !== null) return 1
+    return b.requests - a.requests || a.key.localeCompare(b.key)
+  })
 }
 
 export function rowKey(providerID: string, modelID: string): string {
   return `${providerID}/${modelID}`
-}
-
-export function comparisonRows(
-  samples: Sample[],
-  unavailable: UnavailableSample[],
-): ComparisonRow[] {
-  type Group = { providerID: string; modelID: string; rates: number[]; unavailable: number }
-  const groups = new Map<string, Group>()
-  const ensure = (providerID: string, modelID: string) => {
-    const key = rowKey(providerID, modelID)
-    let group = groups.get(key)
-    if (group === undefined) {
-      group = { providerID, modelID, rates: [], unavailable: 0 }
-      groups.set(key, group)
-    }
-    return group
-  }
-
-  for (const sample of samples) ensure(sample.providerID, sample.modelID).rates.push(sample.rate)
-  for (const sample of unavailable) ensure(sample.providerID, sample.modelID).unavailable++
-
-  const rows = [...groups].map(([key, group]): ComparisonRow => {
-    const measured = group.rates.length > 0
-    return {
-      key,
-      providerID: group.providerID,
-      modelID: group.modelID,
-      median: measured ? median(group.rates) : null,
-      calls: group.rates.length,
-      unavailable: !measured && group.unavailable > 0,
-    }
-  })
-
-  return rows.sort((a, b) => {
-    const unavailableOrder = Number(a.unavailable) - Number(b.unavailable)
-    if (unavailableOrder !== 0) return unavailableOrder
-    const medianOrder = (b.median ?? Number.NEGATIVE_INFINITY) - (a.median ?? Number.NEGATIVE_INFINITY)
-    if (medianOrder !== 0) return medianOrder
-    if (b.calls !== a.calls) return b.calls - a.calls
-    return a.key.localeCompare(b.key)
-  })
 }
 
 function dayStart(epochMs: number): Date {
@@ -147,7 +169,9 @@ export function dayWindow(
 export function barLevels(series: readonly DayPoint[], rows: number): (number | null)[] {
   const max = Math.max(0, ...series.map((point) => point.median ?? 0))
   return series.map((point) => {
-    if (point.median === null || max <= 0) return null
+    if (point.median === null) return null
+    if (point.median === 0) return 0
+    if (max <= 0) return null
     return Math.max(1, Math.round((point.median / max) * rows))
   })
 }

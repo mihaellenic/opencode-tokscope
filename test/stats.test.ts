@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import type { Sample, UnavailableSample } from "../src/metric"
+import { requestFact, type AssistantMessage, type RequestFact, type Sample } from "../src/metric"
 import {
-  applyReasoningFilter,
   barLevels,
-  comparisonRows,
   dailySeries,
   dayWindow,
   localDayKey,
   median,
+  modelRows,
+  percentile95,
 } from "../src/stats"
 
 const sample = (
@@ -18,11 +18,125 @@ const sample = (
   completedAt = 0,
 ): Sample => ({ providerID, modelID, rate, variant, completedAt })
 
-const unavailable = (providerID: string, modelID: string, variant?: string): UnavailableSample => ({
-  providerID,
-  modelID,
-  variant,
-  completedAt: 0,
+const fact = (overrides: Partial<RequestFact> = {}): RequestFact => ({
+  providerID: "provider", modelID: "model", variant: undefined, at: 0, ...overrides,
+})
+
+describe("percentile95", () => {
+  test("nearest rank, empty, singleton, and non-mutating", () => {
+    const values = Array.from({ length: 20 }, (_, i) => (20 - i) * 100)
+    expect(percentile95(values)).toBe(1900)
+    expect(values[0]).toBe(2000)
+    expect(percentile95([])).toBeNull()
+    expect(percentile95([123])).toBe(123)
+  })
+})
+
+describe("modelRows", () => {
+  test("counts every request, per provider/model key", () => {
+    expect(modelRows([fact(), fact(), fact({ modelID: "other" })], []).map(row => [row.key, row.requests]))
+      .toEqual([["provider/model", 2], ["provider/other", 1]])
+  })
+
+  test("same model id under two providers stays two rows", () => {
+    expect(modelRows([fact(), fact({ providerID: "other" })], []).map(row => row.key))
+      .toEqual(["other/model", "provider/model"])
+  })
+
+  test("category totals sum only eligible requests; eligible count tracks them", () => {
+    const [row] = modelRows([
+      fact({ tokens: { input: 10, output: 5, reasoning: 1, cacheRead: 20, cacheWrite: 0 } }),
+      fact({ tokens: { input: 2, output: 3, reasoning: 0, cacheWrite: 4 } }),
+    ], [])
+    expect(row.tokens).toEqual({ input: 12, output: 8, reasoning: 1, cacheRead: 20, cacheWrite: 4 })
+    expect(row.eligible).toEqual({ input: 2, output: 2, reasoning: 2, cacheRead: 1, cacheWrite: 2, triple: 2, response: 0 })
+  })
+
+  test("derived total skips requests missing any of the three, no zero fill", () => {
+    for (const tokens of [{ input: 100, output: 50 }, { input: 100, reasoning: 50 }, { output: 100, reasoning: 50 }]) {
+      const [row] = modelRows([fact({ tokens: { input: 10, output: 5, reasoning: 1 } }), fact({ tokens })], [])
+      expect(row.total).toBe(16)
+      expect(row.eligible.triple).toBe(1)
+      if (tokens.input !== undefined) expect(row.tokens.input).toBe(110)
+    }
+  })
+
+  test("cache read and write never enter total", () => {
+    const [row] = modelRows([fact({ tokens: { input: 10, output: 5, reasoning: 1, cacheRead: 1000, cacheWrite: 2000 } })], [])
+    expect(row.total).toBe(16)
+  })
+
+  test("valid zero triple gives total 0, not null; no triple gives null", () => {
+    expect(modelRows([fact({ tokens: { input: 0, output: 0, reasoning: 0 } })], [])[0].total).toBe(0)
+    expect(modelRows([fact({ tokens: { input: 0, output: 0 } })], [])[0].total).toBeNull()
+  })
+
+  test("zero eligible category gives null, a recorded 0 gives 0", () => {
+    const [row] = modelRows([fact({ tokens: { input: 0 } }), fact()], [])
+    expect(row.tokens).toEqual({ input: 0, output: null, reasoning: null, cacheRead: null, cacheWrite: null })
+    expect(row.eligible.input).toBe(1)
+  })
+
+  test("response median/p95 use only eligible durations", () => {
+    const [row] = modelRows([1000, 2000, 3000, 4000].map(durationMs => fact({ durationMs })).concat(fact()), [])
+    expect(row.responseMedian).toBe(2500)
+    expect(row.responseP95).toBe(4000)
+    expect(row.eligible.response).toBe(4)
+    expect(modelRows(Array.from({ length: 20 }, (_, i) => fact({ durationMs: (i + 1) * 100 })), [])[0].responseP95).toBe(1900)
+    expect(modelRows([fact({ durationMs: 123 })], [])[0]).toMatchObject({ responseMedian: 123, responseP95: 123 })
+    expect(modelRows([fact()], [])[0]).toMatchObject({ responseMedian: null, responseP95: null })
+  })
+
+  test("errored request counts in requests/tokens but not response", () => {
+    const message: AssistantMessage = {
+      id: "msg_error", agent: "build", content: [],
+      type: "assistant", model: { providerID: "provider", id: "model" },
+      time: { created: 1000, streamed: 2000, completed: 3000 },
+      tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 0, write: 0 } },
+      error: { type: "MessageAbortedError", message: "aborted" },
+    }
+    expect(modelRows([requestFact(message)], [])[0]).toMatchObject({
+      requests: 1, total: 16, responseMedian: null, responseP95: null, eligible: { response: 0 },
+    })
+  })
+
+  test("throughput is the median sample rate; request-only row has null throughput and throughputCalls 0", () => {
+    const rows = modelRows([fact(), fact({ modelID: "other" })], [10, 100, 20].map(rate => sample("provider", "model", rate)))
+    expect(rows[0]).toMatchObject({ throughput: 20, throughputCalls: 3 })
+    expect(rows[1]).toMatchObject({ throughput: null, throughputCalls: 0 })
+    expect(modelRows([], [sample("orphan", "model", 100)])).toEqual([])
+  })
+
+  test("ordering: throughput rows by median desc then calls desc then key; request-only rows by requests desc then key; deterministic for shuffled input", () => {
+    const requests = ["fast", "calls", "a", "b", "many", "many", "x", "y"].map(modelID => fact({ modelID }))
+    const samples = [sample("provider", "fast", 100), sample("provider", "calls", 10), sample("provider", "calls", 10), sample("provider", "b", 10), sample("provider", "a", 10)]
+    const rows = modelRows(requests, samples)
+    expect(rows.map(row => row.modelID)).toEqual(["fast", "calls", "a", "b", "many", "x", "y"])
+    expect(modelRows([...requests].reverse(), [...samples].reverse())).toEqual(rows)
+  })
+
+  test("empty input gives []", () => {
+    expect(modelRows([], [])).toEqual([])
+  })
+
+  test("no NaN or Infinity in any numeric field for all-zero tokens", () => {
+    const rows = modelRows([fact({ tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } })], [])
+    const walk = (value: unknown) => {
+      if (typeof value === "number") {
+        expect(Number.isNaN(value)).toBe(false)
+        expect(Number.isFinite(value)).toBe(true)
+      } else if (value !== null && typeof value === "object") Object.values(value).forEach(walk)
+    }
+    walk(rows)
+  })
+})
+
+test("rows combine reasoning variants of the same provider and model", () => {
+  const requests = [fact({ variant: "high" }), fact({ variant: "low" }), fact()]
+  const samples = [sample("provider", "model", 10, "high"), sample("provider", "model", 30)]
+  const rows = modelRows(requests, samples)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({ requests: 3, throughput: 20, throughputCalls: 2 })
 })
 
 describe("median", () => {
@@ -36,71 +150,43 @@ describe("median", () => {
   })
 })
 
-describe("comparisonRows", () => {
+describe("modelRows comparison regression", () => {
   test("groups by provider and model, sorted fastest first", () => {
-    const rows = comparisonRows(
+    const rates =
       [
         sample("anthropic", "claude-sonnet-4", 20),
         sample("anthropic", "claude-sonnet-4", 30),
         sample("openrouter", "claude-sonnet-4", 25),
         sample("google", "gemini-pro", 5),
-      ],
-      [],
-    )
+      ]
+    const rows = modelRows(rates.map(rate => fact({ providerID: rate.providerID, modelID: rate.modelID })), rates)
 
     expect(rows.map((row) => row.key)).toEqual([
       "anthropic/claude-sonnet-4",
       "openrouter/claude-sonnet-4",
       "google/gemini-pro",
     ])
-    expect(rows.map((row) => row.median)).toEqual([25, 25, 5])
-    expect(rows[0].calls).toBe(2)
-    expect(rows[1].calls).toBe(1)
+    expect(rows.map((row) => row.throughput)).toEqual([25, 25, 5])
+    expect(rows[0].throughputCalls).toBe(2)
+    expect(rows[1].throughputCalls).toBe(1)
   })
 
-  test("unavailable rows follow measured rows", () => {
-    const rows = comparisonRows([sample("anthropic", "claude-sonnet-4", 20)], [
-      unavailable("google", "gemini-pro"),
-    ])
+  test("request-only rows follow measured rows without losing their request count", () => {
+    const rows = modelRows([
+      fact({ providerID: "anthropic", modelID: "claude-sonnet-4" }),
+      fact({ providerID: "google", modelID: "gemini-pro" }),
+    ], [sample("anthropic", "claude-sonnet-4", 20)])
 
     expect(rows).toHaveLength(2)
-    expect(rows[0]).toMatchObject({ key: "anthropic/claude-sonnet-4", unavailable: false })
-    expect(rows[1]).toEqual({
+    expect(rows[0]).toMatchObject({ key: "anthropic/claude-sonnet-4", throughput: 20 })
+    expect(rows[1]).toMatchObject({
       key: "google/gemini-pro",
       providerID: "google",
       modelID: "gemini-pro",
-      median: null,
-      calls: 0,
-      unavailable: true,
+      throughput: null,
+      throughputCalls: 0,
+      requests: 1,
     })
-  })
-})
-
-describe("applyReasoningFilter", () => {
-  const samples = [
-    sample("anthropic", "claude", 10, "high"),
-    sample("anthropic", "claude", 20, "low"),
-    sample("anthropic", "claude", 30),
-  ]
-  const missing = [unavailable("anthropic", "claude", "high"), unavailable("anthropic", "claude")]
-
-  test("high keeps only the high setting", () => {
-    const result = applyReasoningFilter(samples, missing, "high")
-    expect(result.samples.map((item) => item.rate)).toEqual([10])
-    expect(result.unavailable).toHaveLength(1)
-  })
-
-  test("unknown keeps only variant-undefined samples", () => {
-    const result = applyReasoningFilter(samples, missing, "unknown")
-    expect(result.samples.map((item) => item.rate)).toEqual([30])
-    expect(result.unavailable).toHaveLength(1)
-    expect(result.unavailable[0].variant).toBeUndefined()
-  })
-
-  test("all keeps everything including unknown", () => {
-    const result = applyReasoningFilter(samples, missing, "all")
-    expect(result.samples).toHaveLength(3)
-    expect(result.unavailable).toHaveLength(2)
   })
 })
 

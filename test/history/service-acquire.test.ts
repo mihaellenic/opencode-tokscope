@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { rangeStartMs } from "../../src/filters"
 import { collectMeasurements, type SessionMeta } from "../../src/harvest"
-import { type HistoryRepository } from "../../src/history/durable"
+import { createMemoryStore, createRepository, type HistoryRepository } from "../../src/history/durable"
 import { signatureFor } from "../../src/history/records"
 import {
   ACQUISITION_RETRY_DELAYS_MS,
@@ -9,10 +9,13 @@ import {
   RECENT_CATCHUP_MS,
   type ViewState,
 } from "../../src/history/service"
-import { comparisonRows } from "../../src/stats"
+import { modelRows } from "../../src/stats"
+import { requestFact } from "../../src/metric"
+import { widgetRows } from "../../src/sidebar/rank"
 import {
   createClock,
   createDeferred,
+  createEventSource,
   createService,
   createStore,
   DAY_MS,
@@ -23,12 +26,105 @@ import {
   storedRecords,
   tokens,
   unmeasured,
+  requestOnly,
+  withTokens,
 } from "./harness"
 
 /** One failed operation spans three attempts: the first immediately, then after one and three seconds. */
 const retryWindowMs = ACQUISITION_RETRY_DELAYS_MS.reduce((total, wait) => total + wait, 0)
 
 describe("history service acquisition", () => {
+  test("rebuild after upgrade equals a fresh uncached collection; v1 inventory is not trusted", async () => {
+    const sessions = [
+      fixture("ses_a", NOW - 1_000, [measured(NOW - 1_500, 10), measured(NOW - 1_600, 20), measured(NOW - 1_700, 30)]),
+      fixture("ses_old", NOW - 40 * DAY_MS, [requestOnly(NOW - 40 * DAY_MS, { failed: true, variant: "high" })]),
+      fixture("ses_b", NOW - 2_000, [withTokens(NOW - 2_500, { input: 20, output: 0, reasoning: 5, cache: { read: 7, write: 9 } }), requestOnly(NOW - 3_000, { unfinished: true, variant: "low" })]),
+    ]
+    const sentinel = "PRIVATE_MESSAGE_TEXT_MUST_NOT_PERSIST"
+    sessions[0]!.messages[0]!.content = [{ type: "text", text: sentinel }]
+    // Build actual old throughput records/inventory/snapshots, not merely an empty stale shell.
+    const store = createMemoryStore()
+    const oldRepo = createRepository(store)
+    for (const entry of sessions) {
+      const scan = await collectMeasurements(Object.assign(new FakeClient(), { sessions: [entry] }), { concurrency: 1 })
+      await oldRepo.putRecords([{ sessionID: entry.meta.id, directory: "/work/a", createdAt: entry.meta.time.created, updatedAt: entry.meta.time.updated, fork: false, signature: signatureFor(entry.meta), scannedAtMs: NOW, complete: true, samples: scan.samples, unavailable: scan.unavailable, requests: scan.requests }], NOW)
+    }
+    await oldRepo.writeCoverage({ schemaVersion: 1, directoryFilter: undefined, fullInventoryCompletedAt: NOW, recentCatchUpAt: NOW })
+    await oldRepo.writeViewSnapshot({ schemaVersion: 1, metricVersion: 1, directoryFilter: undefined, range: "all", rows: [], lastCheckedAt: NOW, savedAtMs: NOW })
+    const oldSamples = storedRecords(oldRepo).flatMap(record => record.samples)
+    const oldWidgetRows = widgetRows(oldSamples, NOW)
+    await store.write("tks.snapshot.view.0", draft => {
+      draft.rows = modelRows(storedRecords(oldRepo).flatMap(record => record.requests), oldSamples)
+        .filter(row => row.throughputCalls > 0)
+        .map(row => ({ key: row.key, providerID: row.providerID, modelID: row.modelID, median: row.throughput, calls: row.throughputCalls, unavailable: false }))
+    })
+    await oldRepo.writeWidgetSnapshot(oldWidgetRows, NOW)
+    for (const [key, value] of store.dump()) {
+      if (!key.startsWith("tks.shard.") && key !== "tks.snapshot.widgetToday") continue
+      await store.write(key, draft => {
+        Object.assign(draft, value, { schemaVersion: 1, metricVersion: 1 })
+        if (key.startsWith("tks.shard.")) for (const record of Object.values(draft.records as Record<string, Record<string, unknown>>)) delete record.requests
+      })
+    }
+    const upgradedClient = Object.assign(new FakeClient(), { sessions })
+    const freshClient = Object.assign(new FakeClient(), { sessions })
+    const clock = createClock(NOW)
+    const upgradedRepo = createRepository(store)
+    const freshRepo = createStore()
+    const upgraded = createService(upgradedClient, upgradedRepo, clock)
+    const fresh = createService(freshClient, freshRepo, clock)
+    expect(upgraded.widget()().status).toBe("loading")
+    const upgradedView = upgraded.view({ directory: undefined, range: "all" })
+    const freshView = fresh.view({ directory: undefined, range: "all" })
+    const releaseUpgrade = upgraded.hold()
+    const releaseFresh = fresh.hold()
+    await clock.settle()
+    expect(upgradedView().kind).toBe("ready")
+    expect(freshView().kind).toBe("ready")
+    expect(upgradedView().requests).toEqual(freshView().requests)
+    expect(upgradedView().requests).toHaveLength(6)
+    expect(upgradedView().requests).toEqual(sessions.toSorted((a, b) => b.meta.time.updated - a.meta.time.updated).flatMap(entry => entry.messages.map(requestFact)))
+    expect(upgradedView().variants).toEqual(["high", "low"])
+    expect(upgradedView().samples).toEqual(freshView().samples)
+    expect(upgradedRepo.readViewSnapshot(undefined, "all")?.rows).toEqual(freshRepo.readViewSnapshot(undefined, "all")?.rows)
+    expect(upgradedRepo.readViewSnapshot(undefined, "all")?.rows).toEqual(modelRows(upgradedView().requests, upgradedView().samples))
+    expect(new Set(upgradedClient.messageCalls.map(call => call.sessionID))).toEqual(new Set(sessions.map(entry => entry.meta.id)))
+    expect(upgraded.widget()().rows).toEqual(oldWidgetRows)
+    expect(upgraded.widget()().rows).toEqual(fresh.widget()().rows)
+    expect(upgradedRepo.readCoverage(undefined)?.schemaVersion).toBe(2)
+    expect(upgradedRepo.readWidgetSnapshot()).toMatchObject({ schemaVersion: 2, metricVersion: 2 })
+    expect(upgradedRepo.readViewSnapshot(undefined, "all")).toMatchObject({ schemaVersion: 2, metricVersion: 2 })
+    for (const value of store.dump().values()) expect(JSON.stringify(value)).not.toContain(sentinel)
+    const persistedRequests = storedRecords(upgradedRepo).flatMap(record => record.requests)
+    expect(persistedRequests).toHaveLength(6)
+    for (const fact of persistedRequests) {
+      expect(Object.keys(fact).every(key => ["providerID", "modelID", "variant", "at", "tokens", "durationMs"].includes(key))).toBe(true)
+      expect(Object.keys(fact.tokens ?? {}).every(key => ["input", "output", "reasoning", "cacheRead", "cacheWrite"].includes(key))).toBe(true)
+    }
+    releaseUpgrade()
+    releaseFresh()
+  })
+
+  test("request-only history publishes kind ready with requests and no samples; dirty rescan updates requests", async () => {
+    const client = new FakeClient()
+    client.sessions = [fixture("ses_a", NOW, [requestOnly(NOW - 1_000, { failed: true, variant: "failed-only" })])]
+    const clock = createClock(NOW)
+    const events = createEventSource()
+    const repository = createStore()
+    const service = createService(client, repository, clock, { subscribeEvents: events.subscribe })
+    const view = service.view({ directory: undefined, range: "all" })
+    const release = service.hold()
+    await clock.settle()
+    expect(view()).toMatchObject({ kind: "ready", samples: [], unavailable: [], variants: ["failed-only"] })
+    expect(view().requests).toEqual(client.sessions[0]!.messages.map(requestFact))
+    expect(repository.readViewSnapshot(undefined, "all")?.rows).toMatchObject([{ requests: 1, throughput: null, total: null }])
+    client.sessions[0]!.messages.push(withTokens(NOW, { input: 1, output: 0, reasoning: 2, cache: { read: 3, write: 4 } }))
+    events.emit("session.usage.recorded", "ses_a")
+    await clock.advance(500)
+    expect(view().requests).toEqual(client.sessions[0]!.messages.map(requestFact))
+    expect(storedRecords(repository)[0]?.requests).toEqual(view().requests)
+    release()
+  })
   test("cold history publishes partial results progressively, newest first", async () => {
     const client = new FakeClient()
     client.sessions = Array.from({ length: 250 }, (_, index) =>
@@ -156,15 +252,15 @@ describe("history service acquisition", () => {
     const firstView = first.view({ directory: "/work/a", range: "last30" })
     await clock.settle()
     expect(firstView().kind).toBe("ready")
-    const savedRows = comparisonRows(firstView().samples, firstView().unavailable)
+    const savedRows = modelRows(firstView().requests, firstView().samples)
     expect(savedRows).toHaveLength(1)
-    expect(savedRows[0].calls).toBe(3)
+    expect(savedRows[0].throughputCalls).toBe(3)
     expect(first.widget()().stale).toBe(false)
     firstRelease()
 
     const snapshot = repository.readViewSnapshot("/work/a", "last30")
     expect(snapshot?.lastCheckedAt).toBe(NOW)
-    expect(snapshot?.rows).toEqual(savedRows)
+    expect(snapshot?.rows).toEqual(modelRows(firstView().requests, firstView().samples))
 
     const restarted = new FakeClient()
     restarted.sessions = sessions()
@@ -177,7 +273,7 @@ describe("history service acquisition", () => {
     expect(restored().kind).toBe("cached")
     expect(restored().lastCheckedAt).toBe(NOW)
     expect(restored().refreshing).toBe(true)
-    expect(comparisonRows(restored().samples, restored().unavailable)).toEqual(savedRows)
+    expect(modelRows(restored().requests, restored().samples)).toEqual(savedRows)
     expect(restarted.sessionCalls).toHaveLength(0)
     // The widget is served from its durable snapshot, flagged stale until the live pass replaces it.
     expect(second.widget()()).toEqual({
@@ -353,8 +449,8 @@ describe("history service acquisition", () => {
 
     const state = view()
     expect(state.kind).toBe("ready")
-    expect(comparisonRows(state.samples, state.unavailable)).toEqual(
-      comparisonRows(direct.samples, direct.unavailable),
+    expect(modelRows(state.requests, state.samples)).toEqual(
+      modelRows(direct.requests, direct.samples),
     )
     expect(state.variants).toEqual(direct.variants)
     expect(state.samples).toHaveLength(direct.samples.length)
@@ -402,6 +498,7 @@ describe("history service acquisition", () => {
           complete: true,
           samples: [{ providerID: "p", modelID: "m1", variant: undefined, rate: 99, completedAt: NOW - 2_000 }],
           unavailable: [],
+          requests: [{ providerID: "p", modelID: "m1", variant: undefined, at: NOW - 2_000 }],
         },
       ],
       NOW,

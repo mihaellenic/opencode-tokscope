@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { DEFAULT_FILTERS, rangeStartMs } from "../src/filters"
-import { formatCoverage, formatRate, modelDisplayName } from "../src/format"
+import { formatRate, modelDisplayName } from "../src/format"
 
 describe("filters", () => {
   test("defaults match spec", () => {
-    expect(DEFAULT_FILTERS).toEqual({ scope: "all", range: "last30", reasoning: "all" })
+    expect(DEFAULT_FILTERS).toEqual({ scope: "all", range: "today" })
   })
 
   test("rangeStartMs is a rolling window", () => {
@@ -12,14 +12,20 @@ describe("filters", () => {
     expect(rangeStartMs("last30", now)).toBe(now - 30 * 86_400_000)
     expect(rangeStartMs("all", now)).toBeUndefined()
   })
+
+  test("today starts at local midnight and includes the current instant", () => {
+    const noon = new Date(2026, 10, 21, 12, 30).getTime()
+    expect(rangeStartMs("today", noon)).toBe(new Date(2026, 10, 21).getTime())
+    const justAfterMidnight = new Date(2026, 10, 21, 0, 0, 1).getTime()
+    expect(rangeStartMs("today", justAfterMidnight)).toBe(new Date(2026, 10, 21).getTime())
+    const lateNight = new Date(2026, 10, 21, 23, 59, 59).getTime()
+    expect(rangeStartMs("today", lateNight)).toBe(new Date(2026, 10, 21).getTime())
+    // A new local day moves the window forward even when less than 24 hours have elapsed.
+    expect(rangeStartMs("today", new Date(2026, 10, 22, 0, 0, 1).getTime())).toBe(new Date(2026, 10, 22).getTime())
+  })
 })
 
 describe("format", () => {
-  test("formatCoverage includes unavailable only when present", () => {
-    expect(formatCoverage(183, 12)).toBe("183 measured calls; 12 unavailable")
-    expect(formatCoverage(5, 0)).toBe("5 measured calls")
-  })
-
   test("formatRate shows one decimal", () => {
     expect(formatRate(41.34)).toBe("41.3 tok/s")
   })

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage, Sample, UnavailableSample } from "../src/metric"
+import type { AssistantMessage, RequestFact, Sample, UnavailableSample } from "../src/metric"
 import {
   collectMeasurements,
   collectVariants,
   inRangeSamples,
+  inRangeRequests,
   listSessions,
   scanMessages,
   type HarvestClient,
@@ -133,6 +134,21 @@ class FakeClient implements HarvestClient {
 }
 
 describe("collectMeasurements", () => {
+  test("filters request facts by at and collects request-only variants in range", async () => {
+    const client = new FakeClient(pages([session("s1", 0, 20_000)]), {
+      s1: pages([
+        assistant({ created: 9_000, model: { providerID: "openai", id: "gpt-5", variant: "old" } }),
+        assistant({ created: 10_000, model: { providerID: "openai", id: "gpt-5", variant: "new" } }),
+        measured({ created: 1_000, completed: 12_000 }),
+      ]),
+    })
+
+    const result = await collectMeasurements(client, { fromMs: 10_000 })
+
+    expect(result.requests.map((fact) => fact.at)).toEqual([10_000, 12_000])
+    expect(result.variants).toEqual(["new"])
+  })
+
   test("paginates sessions newest-first with directory filter", async () => {
     const client = new FakeClient(pages([session("s1", 100, 200)], [session("s2", 50, 60)]))
 
@@ -251,6 +267,70 @@ describe("collectMeasurements", () => {
 })
 
 describe("scanMessages", () => {
+  test("scanMessages returns a fact for failed, cancelled and unfinished requests", async () => {
+    const client = new FakeClient([], { s1: pages([
+      measured({ error: { type: "provider" } }),
+      measured({ error: { type: "cancelled" } }),
+      assistant({ created: 3_000, tokens: tokens(10, 0, 0) }),
+    ]) })
+
+    const result = await scanMessages(client, session("s1", 0, 4_000))
+
+    expect(result.requests.map((fact) => fact.at)).toEqual([2_500, 2_500, 3_000])
+    expect(result.requests.every((fact) => fact.tokens !== undefined && fact.durationMs === undefined)).toBe(true)
+    expect(result.samples).toEqual([])
+    expect(result.unavailable).toEqual([])
+  })
+
+  test("fork skip applies to facts and samples alike", async () => {
+    const client = new FakeClient([], { s1: pages([
+      measured({ created: 999 }),
+      assistant({ created: 999 }),
+      measured({ created: 1_000 }),
+      assistant({ created: 1_001 }),
+    ]) })
+    const result = await scanMessages(client, session("s1", 1_000, 4_000, undefined, {
+      sessionID: "parent", boundary: { type: "through", messageID: "m1" },
+    }))
+
+    expect(result.samples).toHaveLength(1)
+    expect(result.requests.map((fact) => fact.at)).toEqual([2_500, 1_001])
+  })
+
+  test("multi-model session attributes each fact by message.model", async () => {
+    const client = new FakeClient([], { s1: pages([
+      measured({ model: { providerID: "anthropic", id: "sonnet", variant: "high" } }),
+      assistant({ model: { providerID: "openai", id: "gpt-5" } }),
+    ]) })
+    const result = await scanMessages(client, session("s1", 0, 4_000))
+
+    expect(result.requests.map(({ providerID, modelID, variant }) => ({ providerID, modelID, variant }))).toEqual([
+      { providerID: "anthropic", modelID: "sonnet", variant: "high" },
+      { providerID: "openai", modelID: "gpt-5", variant: undefined },
+    ])
+  })
+
+  test("requests every page with type assistant so compaction never arrives", async () => {
+    const client = new FakeClient([], { s1: pages([measured()], [assistant()], [measured()]) })
+
+    await scanMessages(client, session("s1", 0, 4_000))
+
+    expect(client.messageCalls).toHaveLength(3)
+    expect(client.messageCalls.every((input) => input.type === "assistant")).toBe(true)
+  })
+
+  test("facts and samples agree: every sample's completedAt equals its fact's at", async () => {
+    const client = new FakeClient([], { s1: pages([
+      measured({ completed: 3_000 }),
+      measured({ completed: 5_000 }),
+      assistant({ completed: 7_000 }),
+    ]) })
+    const result = await scanMessages(client, session("s1", 0, 8_000))
+
+    expect(result.samples.map((sample) => sample.completedAt)).toEqual(result.requests.slice(0, 2).map((fact) => fact.at))
+    expect(result.unavailable[0].completedAt).toBe(result.requests[2].at)
+  })
+
   test("returns complete session measurements without range filtering", async () => {
     const client = new FakeClient([], {
       s1: pages(
@@ -421,6 +501,15 @@ describe("inRangeSamples", () => {
 })
 
 describe("collectVariants", () => {
+  test("collectVariants includes variants seen only on request facts", () => {
+    const requests: RequestFact[] = [
+      { providerID: "openai", modelID: "gpt-5", variant: "low", at: 1_000 },
+      { providerID: "openai", modelID: "gpt-5", variant: "high", at: 2_000 },
+      { providerID: "openai", modelID: "gpt-5", variant: undefined, at: 3_000 },
+    ]
+    expect(collectVariants([sampleAt(1_000, "high")], [], requests)).toEqual(["high", "low"])
+  })
+
   test("returns sorted unique variants across samples and unavailable", () => {
     const variants = collectVariants(
       [sampleAt(1_000, "high"), sampleAt(2_000), sampleAt(3_000, "low")],
@@ -428,5 +517,17 @@ describe("collectVariants", () => {
     )
 
     expect(variants).toEqual(["high", "low"])
+  })
+})
+
+describe("inRangeRequests", () => {
+  test("inRangeRequests filters on at", () => {
+    const requests: RequestFact[] = [999, 1_000, 1_001].map((at) => ({
+      providerID: "openai", modelID: "gpt-5", variant: undefined, at,
+    }))
+
+    expect(inRangeRequests(requests, 1_000)).toEqual(requests.slice(1))
+    expect(inRangeRequests(requests, undefined)).toBe(requests)
+    expect(inRangeRequests(requests, 2_000)).toEqual([])
   })
 })

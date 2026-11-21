@@ -1,11 +1,12 @@
 import type { DayPoint } from "../stats"
 import { formatDayLabel } from "../format"
 
-export const PLOT_ROWS = 8
+export const PLOT_ROWS = 3
 const BAR_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const
 
 export function barChar(level: number | null, row: number, rows: number): string {
   if (level === null) return " "
+  if (level === 0) return row === 0 ? "▁" : " "
   if (level > row + 1) return "█"
   if (level !== row + 1) return " "
   const index = Math.min(7, Math.max(0, Math.ceil((level / rows) * 8) - 1))

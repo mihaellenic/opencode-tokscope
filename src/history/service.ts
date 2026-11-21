@@ -3,14 +3,15 @@ import { rangeStartMs, type RangeFilter } from "../filters"
 import {
   collectVariants,
   inRangeSamples,
+  inRangeRequests,
   listSessions,
   scanMessages,
   type HarvestClient,
   type SessionMeta,
 } from "../harvest"
-import type { Sample, UnavailableSample } from "../metric"
+import type { RequestFact, Sample, UnavailableSample } from "../metric"
 import { widgetRows, type WidgetRow } from "../sidebar/rank"
-import { comparisonRows } from "../stats"
+import { modelRows } from "../stats"
 import type { HistoryRepository } from "./durable"
 import {
   CACHE_SCHEMA_VERSION,
@@ -95,6 +96,7 @@ export interface ViewState {
   kind: "loading" | "partial" | "cached" | "ready" | "error"
   samples: Sample[]
   unavailable: UnavailableSample[]
+  requests: RequestFact[]
   variants: string[]
   scanned: number
   lastCheckedAt: number | undefined
@@ -556,10 +558,11 @@ export function createHistoryService(deps: {
     return count
   }
 
-  function liveView(request: ViewRequest): { samples: Sample[]; unavailable: UnavailableSample[] } {
+  function liveView(request: ViewRequest): { samples: Sample[]; unavailable: UnavailableSample[]; requests: RequestFact[] } {
     const fromMs = rangeStartMs(request.range, now())
     const samples: Sample[] = []
     const unavailable: UnavailableSample[] = []
+    const requests: RequestFact[] = []
     for (const entry of index.values()) {
       if (!matchesScope(entry.directory, request.directory)) continue
       if (fromMs !== undefined && entry.updatedAt < fromMs) continue
@@ -568,8 +571,9 @@ export function createHistoryService(deps: {
       const inRange = inRangeSamples(record, fromMs)
       samples.push(...inRange.samples)
       unavailable.push(...inRange.unavailable)
+      requests.push(...inRangeRequests(record.requests, fromMs))
     }
-    return { samples, unavailable }
+    return { samples, unavailable, requests }
   }
 
   function buildState(
@@ -580,13 +584,14 @@ export function createHistoryService(deps: {
     refreshFailed: boolean,
   ): ViewState {
     const data = liveView(request)
-    const hasData = data.samples.length > 0 || data.unavailable.length > 0
+    const hasData = data.requests.length > 0
     return {
       // Progressive publication never reports "partial" before there is anything to show.
       kind: kind === "partial" && !hasData ? "loading" : kind,
       samples: data.samples,
       unavailable: data.unavailable,
-      variants: collectVariants(data.samples, data.unavailable),
+      requests: data.requests,
+      variants: collectVariants(data.samples, data.unavailable, data.requests),
       scanned: countIndex(request.directory),
       lastCheckedAt,
       refreshing,
@@ -865,7 +870,7 @@ export function createHistoryService(deps: {
         metricVersion: METRIC_VERSION,
         directoryFilter: entry.request.directory,
         range: entry.request.range,
-        rows: comparisonRows(data.samples, data.unavailable),
+        rows: modelRows(data.requests, data.samples),
         lastCheckedAt: checkedAt,
         savedAtMs: checkedAt,
       }

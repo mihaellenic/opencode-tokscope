@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { rangeStartMs } from "../../src/filters"
 import { createMemoryStore, createRepository } from "../../src/history/durable"
 import { signatureFor } from "../../src/history/records"
 import {
@@ -20,6 +21,7 @@ import {
   FakeClient,
   fixture,
   measured,
+  requestOnly,
   NOW,
   storedRecords,
 } from "./harness"
@@ -28,6 +30,18 @@ const scannedIds = (client: FakeClient, from = 0): string[] =>
   client.messageCalls.slice(from).map((call) => call.sessionID)
 
 describe("history service scheduling", () => {
+  test("range filter prunes requests by at, with unfinished requests attributed by created", async () => {
+    const cutoff = rangeStartMs("last7", NOW)!
+    const client = new FakeClient()
+    client.sessions = [fixture("ses_a", NOW, [requestOnly(cutoff + 1_999, { unfinished: true }), requestOnly(cutoff + 2_000, { unfinished: true }), measured(NOW - 1_000)])]
+    const clock = createClock(NOW)
+    const service = createService(client, createStore(), clock)
+    const view = service.view({ directory: undefined, range: "last7" })
+    const release = service.hold()
+    await clock.settle()
+    expect(view().requests.map(request => request.at)).toEqual([cutoff, NOW - 1_000])
+    release()
+  })
   test("event burst coalesces to one revision per session", async () => {
     const client = new FakeClient()
     client.sessions = [
