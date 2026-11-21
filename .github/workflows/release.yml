@@ -36,7 +36,7 @@ jobs:
 
   publish:
     needs: release-please
-    if: always() && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch')
+    if: always() && github.ref == 'refs/heads/main' && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,10 +62,7 @@ jobs:
           fi
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")
-            release_tag=$(printf '%s' "$release" | jq -r '.tag_name // empty')
-            draft=$(printf '%s' "$release" | jq -r '.draft // empty')
-            test "$release_tag" = "$tag"
-            test "$draft" = "false"
+            printf '%s' "$release" | jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false' >/dev/null
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Release ref: $tag"

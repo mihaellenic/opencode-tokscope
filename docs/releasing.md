@@ -10,6 +10,10 @@ Do not merge it just to update the changelog.
 - On npm, configure the package's **Trusted Publisher** for GitHub repository
   `mihaellenic/opencode-tokscope` and workflow filename **`release.yml`**.
   Publishing uses OIDC; do not add a stored npm token or `NODE_AUTH_TOKEN`.
+  Keep repository write access restricted to npm release maintainers. Before
+  granting it more broadly, bind the trusted publisher to a GitHub environment
+  that only permits deployments from `main`; the workflow's own ref check can
+  only enforce the workflow definition being run.
 - For local development, run `bun install` and `bun run setup` to install the
   Conventional Commit hook. CI also validates commit subjects.
 
@@ -156,7 +160,7 @@ full acceptance. Never overwrite a published version or move its tag.
 - **Failure before publication:** use **Actions → Release → Re-run failed jobs**
   on the original run to retain its Release Please outputs and repeat acceptance.
 - **Original run cannot be retried:** use **Actions → Release → Run workflow**
-  with `release_tag` set to an existing `vX.Y.Z`. Recovery requires a non-draft
+  on `main` with `release_tag` set to an existing `vX.Y.Z`. Recovery requires a non-draft
   GitHub Release and matching tag/package version. It repeats acceptance and
   publication; it is not a PR-validation path.
 - **Version already exists on npm:** do not retry publishing or bypass the

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -51,6 +52,22 @@ function runBlocks(source: string): string[] {
   }
   if (current !== undefined) blocks.push(current.join("\n"))
   return blocks
+}
+
+function recoverRelease(releaseFixture: { tag_name: string; draft?: boolean | string }) {
+  const resolveRef = runBlocks(jobBlock(release, "publish")).find((body) => body.includes("/releases/tags/$tag"))
+  if (!resolveRef) throw new Error("missing Resolve release ref script")
+  return spawnSync("bash", ["-c", `gh() { printf '%s' "$RELEASE_FIXTURE"; }\n${resolveRef}`], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      EVENT_NAME: "workflow_dispatch",
+      DISPATCH_TAG: "v1.0.0",
+      GITHUB_REPOSITORY: "mihaellenic/opencode-tokscope",
+      GITHUB_OUTPUT: "/dev/stdout",
+      RELEASE_FIXTURE: JSON.stringify(releaseFixture),
+    },
+  })
 }
 
 describe("CI workflow structure", () => {
@@ -146,11 +163,28 @@ describe("release workflow security and gating", () => {
     expect(release).toContain("release_tag:")
     expect(release).toContain("        required: true")
     expect(release).toContain("ref: ${{ steps.resolve.outputs.tag }}")
-    expect(release).toContain("releases/tags/$tag")
-    expect(release).toContain('test "$draft" = "false"')
     expect(release).toContain('test "$version" = "${RELEASE_TAG#v}"')
     expect(release).toContain('git describe --tags --exact-match HEAD')
   })
+
+  test("recovers the requested non-draft release", () => {
+    const result = recoverRelease({ tag_name: "v1.0.0", draft: false })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("tag=v1.0.0")
+  })
+
+  for (const fixture of [
+    { tag_name: "v1.0.0", draft: true },
+    { tag_name: "v1.0.0", draft: "false" },
+    { tag_name: "v1.0.0" },
+    { tag_name: "v0.4.0", draft: false },
+  ]) {
+    test(`refuses release recovery for ${JSON.stringify(fixture)}`, () => {
+      const result = recoverRelease(fixture)
+      expect(result.status).toBe(1)
+      expect(result.stdout).not.toContain("tag=")
+    })
+  }
 
   test("serializes release runs without cancelling the active one", () => {
     expect(release).toContain("concurrency:\n  group: release\n  cancel-in-progress: false")
@@ -191,7 +225,7 @@ describe("release workflow security and gating", () => {
     const publish = jobBlock(release, "publish")
     expect(publish).toContain("needs: release-please")
     expect(publish).toContain(
-      "if: always() && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch')",
+      "if: always() && github.ref == 'refs/heads/main' && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch')",
     )
     expect(publish).toContain("ref: ${{ steps.resolve.outputs.tag }}")
     expect(publish).toContain('bun scripts/release-acceptance.ts --output-dir "$ARTIFACT_DIR"')
