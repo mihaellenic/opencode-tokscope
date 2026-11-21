@@ -49,7 +49,7 @@ describe("package manifest", () => {
 
   test("keeps the released version in step with release-please", () => {
     expect(manifest.version).toBe(releasePleaseManifest["."])
-    expect(manifest.version).toMatch(/^0\./)
+    expect(manifest.version).toMatch(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/)
   })
 
   test("points at the canonical repository", () => {
