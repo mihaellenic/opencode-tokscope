@@ -1,6 +1,6 @@
 {
   "name": "opencode-tokscope",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Model and provider throughput comparisons for OpenCode V2.",
   "keywords": [
     "opencode",
@@ -39,9 +39,15 @@
     "solid-js": "^1.9.17"
   },
   "peerDependenciesMeta": {
-    "@opentui/core": { "optional": true },
-    "@opentui/solid": { "optional": true },
-    "solid-js": { "optional": true }
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@opencode/client": "2.1.2",

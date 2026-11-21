@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.4.0...v1.0.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* the reasoning-setting filter and its `r` key are removed; requests of every reasoning setting for a model/provider are combined. The page now opens on "today" instead of the last 30 days. The durable cache schema and metric version are bumped, so existing caches rebuild from history on first load.
+
+### Features
+
+* add historical per-model usage analytics and drop the reasoning filter ([1fda798](https://github.com/mihaellenic/opencode-tokscope/commit/1fda7980375886dc290a2a575564f3b257fafa8f))
+
+
+### Bug Fixes
+
+* remove vulnerable duplicate host dependencies ([a2d4dc7](https://github.com/mihaellenic/opencode-tokscope/commit/a2d4dc7e3333fc367b7eddc6a6d5e405d4f089bc))
+* validate release recovery on main ([845ce09](https://github.com/mihaellenic/opencode-tokscope/commit/845ce09d3286231b30f76089afa14241a51f68f7))
+
+
+### Tests
+
+* support stable major releases ([7d087e6](https://github.com/mihaellenic/opencode-tokscope/commit/7d087e60cddf1e9bab2a50f5f71d5eea4dcb13f2))
+
 ## [0.4.0](https://github.com/mihaellenic/opencode-tokscope/compare/v0.3.0...v0.4.0) (2026-10-31)
 
 
